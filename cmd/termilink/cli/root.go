@@ -10,9 +10,9 @@ func NewRootCmd() *cobra.Command {
 	var configPath string
 
 	root := &cobra.Command{
-		Use:     "termilink",
-		Short:   "Remote terminal access and development automation for your own computer",
-		Version: version.Version,
+		Use:           "termilink",
+		Short:         "Remote terminal access and development automation for your own computer",
+		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

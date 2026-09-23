@@ -3,6 +3,7 @@ package telegram
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/saliherden/termilink/internal/terminal"
 	"github.com/saliherden/termilink/internal/version"
@@ -14,11 +15,14 @@ var welcomeMsg = "*TermiLink — Remote Terminal*\n\n" +
 	"/start — show this message\n" +
 	"/help — show command help\n" +
 	"/project <name> — switch working directory to a configured project\n" +
-	"/status — show current session context\n" +
+	"/status — show current session context and shell tail\n" +
+	"/input <text> — send input to the running command (e.g. `/input ctrl-c`)\n" +
+	"/stop — interrupt the running command (SIGINT)\n" +
+	"/exit — close the persistent shell\n" +
 	"/sessions — list active terminal sessions\n" +
 	"/ping — health check\n\n" +
 	"*Usage*\n" +
-	"Everything that is not a command is executed directly in the shell:\n\n" +
+	"Everything that is not a command is executed in the persistent shell:\n\n" +
 	"• `cd ~/projects/my-app` — change the persistent working directory\n" +
 	"• `npm run dev` — run any command\n" +
 	"• Type a configured project command name (e.g. `build`) to run it.\n\n" +
@@ -26,16 +30,19 @@ var welcomeMsg = "*TermiLink — Remote Terminal*\n\n" +
 
 const helpMsg = "*TermiLink Help*\n\n" +
 	"*Direct Terminal*\n" +
-	"Send any shell command as a plain message. The command runs on your\n" +
-	"computer and the output streams back here.\n\n" +
-	"Working directory persists per chat with `cd`.\n\n" +
+	"Send any shell command as a plain message. Commands run inside a\n" +
+	"persistent interactive shell, so the working directory and environment\n" +
+	"are preserved; only whitelisted users can reach the agent.\n\n" +
 	"*Project switching*\n" +
 	"/project <name>\n" +
 	"Lists projects with /projects and /help.\n\n" +
+	"*Interactive control*\n" +
+	"/input <text> — write to the running command (newline appended)\n" +
+	"/input ctrl-c — send SIGINT to interrupt\n" +
+	"/stop — interrupt the running command\n" +
+	"/exit — close the shell\n\n" +
 	"*Session state*\n" +
-	"/status shows the current working directory and last command for this chat.\n\n" +
-	"_Everything you send is executed as shell code. Only whitelisted users can\n" +
-	"reach this agent._"
+	"/status shows the project, working directory and shell tail for this chat."
 
 const (
 	pingOK  = "🏓 pong"
@@ -121,6 +128,39 @@ func formatRun(cmd string, res terminal.Result) string {
 
 func formatErr(msg string) string {
 	return "⚠️ " + msg
+}
+
+func formatTimeout(cmd, out string, timeout time.Duration) string {
+	var b strings.Builder
+	b.WriteString("`$ " + escapeCode(cmd) + "`\n\n")
+	if strings.TrimSpace(out) == "" {
+		out = "_(no output)_"
+	}
+	b.WriteString(sanitizeCodeBlock(out) + "\n\n")
+	fmt.Fprintf(&b, "⏱ Command did not finish within %s.", timeout.Round(time.Second))
+	return b.String()
+}
+
+func formatInterrupted(cmd, out string) string {
+	var b strings.Builder
+	b.WriteString("`$ " + escapeCode(cmd) + "`\n\n")
+	if strings.TrimSpace(out) == "" {
+		out = "_(no output)_"
+	}
+	b.WriteString(sanitizeCodeBlock(out) + "\n\n")
+	b.WriteString("⏹ Command interrupted.")
+	return b.String()
+}
+
+func sanitizeCodeBlock(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+	if len(s) > 3800 {
+		s = s[:3800] + "\n… (truncated) …"
+	}
+	return strings.ReplaceAll(s, "```", "'''")
 }
 
 func sanitizeCode(s string) string {

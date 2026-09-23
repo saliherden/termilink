@@ -20,9 +20,9 @@ type State struct {
 	ID      string `json:"id"`
 	Cwd     string `json:"cwd"`
 	Project string `json:"project,omitempty"`
-	Active  bool   `json:"active"`
+	Active  bool   `json:"-"`
 	LastCmd string `json:"last_cmd"`
-	PID     int    `json:"pid"`
+	PID     int    `json:"-"`
 }
 
 type Manager struct {

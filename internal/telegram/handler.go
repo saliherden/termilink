@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	tg "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -20,8 +23,9 @@ import (
 )
 
 const (
-	defaultMaxMsgLen = 3500
-	msgMaxLength     = 4096
+	defaultMaxMsgLen  = 3500
+	msgMaxLength      = 4096
+	defaultCmdTimeout = 30 * time.Minute
 )
 
 type Handler struct {
@@ -30,7 +34,11 @@ type Handler struct {
 	sessions   *session.Manager
 	projects   map[string]config.ProjectConfig
 	maxMsgLen  int
+	timeout    time.Duration
 	log        *slog.Logger
+
+	shellMu sync.Mutex
+	shells  map[string]*terminal.Shell
 }
 
 type Options struct {
@@ -39,6 +47,7 @@ type Options struct {
 	Sessions   *session.Manager
 	Projects   map[string]config.ProjectConfig
 	MaxMsgLen  int
+	Timeout    time.Duration
 	Logger     *slog.Logger
 }
 
@@ -49,10 +58,15 @@ func NewHandler(opts Options) *Handler {
 		sessions:   opts.Sessions,
 		projects:   opts.Projects,
 		maxMsgLen:  opts.MaxMsgLen,
+		timeout:    opts.Timeout,
 		log:        opts.Logger,
+		shells:     map[string]*terminal.Shell{},
 	}
 	if h.maxMsgLen <= 0 || h.maxMsgLen > msgMaxLength {
 		h.maxMsgLen = defaultMaxMsgLen
+	}
+	if h.timeout <= 0 {
+		h.timeout = defaultCmdTimeout
 	}
 	if h.sessions == nil {
 		h.sessions = session.NewManager()
@@ -61,6 +75,13 @@ func NewHandler(opts Options) *Handler {
 		h.log = slog.Default()
 	}
 	return h
+}
+
+func (h *Handler) commandTimeout() time.Duration {
+	if h.timeout > 0 {
+		return h.timeout
+	}
+	return defaultCmdTimeout
 }
 
 func (h *Handler) Callback() tg.HandlerFunc {
@@ -111,9 +132,15 @@ func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, st
 	case "project":
 		h.handleProject(ctx, b, chatID, st, args)
 	case "status":
-		h.send(ctx, b, chatID, formatStatus(st.Project, h.effectiveCwd(st), st.LastCmd))
+		h.send(ctx, b, chatID, h.formatSessionStatus(st))
 	case "sessions":
 		h.send(ctx, b, chatID, formatSessions(h.sessionRows()))
+	case "input":
+		h.handleInput(ctx, b, chatID, st, args)
+	case "stop":
+		h.handleStop(ctx, b, chatID, st)
+	case "exit":
+		h.handleExit(ctx, b, chatID, st)
 	default:
 		h.send(ctx, b, chatID, unknown)
 	}
@@ -134,6 +161,7 @@ func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, st
 		h.send(ctx, b, chatID, formatErr("project path not reachable: "+p.Path))
 		return
 	}
+	h.closeShellFor(st.ID)
 	st.Cwd = p.Path
 	st.Project = name
 	h.sessions.Save()
@@ -145,9 +173,71 @@ func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, st
 	h.send(ctx, b, chatID, formatProjectHome(name, p.Path, cmdNames))
 }
 
+func (h *Handler) handleInput(ctx context.Context, b *tg.Bot, chatID int64, st *session.State, args []string) {
+	shell := h.shellFor(st.ID)
+	if shell == nil || !shell.IsAlive() {
+		h.send(ctx, b, chatID, formatErr("no active shell; send a command first."))
+		return
+	}
+	text := strings.Join(args, " ")
+	trimmed := strings.TrimSpace(text)
+	var data string
+	switch strings.ToLower(trimmed) {
+	case "ctrl-c", "^c", "int", "sigint":
+		data = "\x03"
+	case "ctrl-d", "^d", "eof":
+		data = "\x04"
+	case "enter":
+		data = "\n"
+	default:
+		if strings.HasPrefix(trimmed, "raw:") {
+			data = strings.TrimPrefix(text, "raw:")
+		} else {
+			data = text + "\n"
+		}
+	}
+	if err := shell.Write([]byte(data)); err != nil {
+		h.send(ctx, b, chatID, formatErr("failed to write to shell: "+err.Error()))
+		return
+	}
+	h.sendPlain(ctx, b, chatID, "📥 Input sent.")
+}
+
+func (h *Handler) handleStop(ctx context.Context, b *tg.Bot, chatID int64, st *session.State) {
+	shell := h.shellFor(st.ID)
+	if !st.Active || shell == nil || !shell.IsAlive() {
+		h.sendPlain(ctx, b, chatID, "⏹ No command is running.")
+		return
+	}
+	_ = shell.Stop()
+}
+
+func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, st *session.State) {
+	h.closeShellFor(st.ID)
+	st.Active = false
+	h.sessions.Save()
+	h.sendPlain(ctx, b, chatID, "🗑 Shell closed.")
+}
+
+func (h *Handler) formatSessionStatus(st *session.State) string {
+	var extra strings.Builder
+	if shell := h.shellFor(st.ID); shell != nil && shell.IsAlive() {
+		fmt.Fprintf(&extra, "\n\nShell:\n`pid %d, up %s`", shell.PID(), shell.Age().Round(time.Second))
+		tail := shell.Tail(2048)
+		cleaned := terminal.CleanShellOutput([]byte(tail))
+		cleaned = terminal.TruncateOutput(cleaned, 1200)
+		if strings.TrimSpace(string(cleaned)) != "" {
+			fmt.Fprintf(&extra, "\n\nLast output tail:\n```\n%s\n```", sanitizeCodeBlock(string(cleaned)))
+		}
+	} else {
+		extra.WriteString("\n\nShell: _(closed)_. Send a command to start one.")
+	}
+	return formatStatus(st.Project, h.effectiveCwd(st), st.LastCmd) + extra.String()
+}
+
 func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, raw string) {
 	if st.Active {
-		h.send(ctx, b, chatID, formatErr("a command is already running in this session; send /status to inspect it."))
+		h.send(ctx, b, chatID, formatErr("a command is already running in this session; use /stop to interrupt it."))
 		return
 	}
 	if reason, ok := h.authorizeCommand(st, h.authorizer.IsOwner(userID), raw); !ok {
@@ -156,44 +246,58 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	}
 
 	command, isCd := h.resolve(st, raw)
-
-	if isCd {
-		res, err := h.runner.Execute(ctx, st.Cwd, command, nil)
-		if err != nil {
-			h.send(ctx, b, chatID, formatErr("failed to change directory: "+err.Error()))
-			return
-		}
-		if res.ExitCode != 0 {
-			h.send(ctx, b, chatID, formatRun(command, res))
-			return
-		}
-		st.Cwd = firstLine(string(res.Output))
-		st.Project = h.projectNameByPath(st.Cwd)
-		st.LastCmd = raw
-		h.sessions.Save()
-		h.send(ctx, b, chatID, "📁 Working directory:\n`"+escapeCode(st.Cwd)+"`")
+	shell, err := h.getShell(st)
+	if err != nil {
+		h.send(ctx, b, chatID, formatErr("failed to open shell: "+err.Error()))
 		return
 	}
 
+	runCtx, cancel := context.WithTimeout(ctx, h.commandTimeout())
+	defer cancel()
+
 	st.Active = true
 	st.LastCmd = raw
+	h.sessions.Save()
 	defer func() {
 		st.Active = false
 		h.sessions.Save()
 	}()
 
-	_, _ = b.SendChatAction(ctx, &tg.SendChatActionParams{ChatID: chatID, Action: models.ChatActionTyping})
+	res, err := shell.ExecCommand(runCtx, command)
 
-	res, err := h.runner.Execute(ctx, st.Cwd, command, nil)
-	if err != nil {
-		h.send(ctx, b, chatID, formatErr(err.Error()))
+	if pwd := terminal.ParsePWD(res); pwd != "" {
+		st.Cwd = pwd
+		st.Project = h.projectNameByPath(pwd)
+		h.sessions.Save()
+	}
+
+	display := terminal.TruncateOutput(terminal.CleanShellOutput(res), h.maxMsgLen)
+
+	switch {
+	case err == nil:
+	case errors.Is(err, context.DeadlineExceeded):
+		h.send(ctx, b, chatID, formatTimeout(command, string(display), h.commandTimeout()))
+		return
+	case errors.Is(err, terminal.ErrInterrupted):
+		h.send(ctx, b, chatID, formatInterrupted(command, string(display)))
+		return
+	default:
+		h.log.Warn("shell command failed", "chat_id", chatID, "command", raw, "err", err)
+		h.send(ctx, b, chatID, formatErr("command failed: "+err.Error()+"\n"+string(display)))
 		return
 	}
-	if res.Capped {
-		h.log.Warn("command output hit max_output_bytes", "chat_id", chatID, "command", raw)
+
+	if isCd {
+		wd := h.effectiveCwd(st)
+		h.send(ctx, b, chatID, "📁 Working directory:\n`"+escapeCode(wd)+"`")
+		return
 	}
-	res.Output = terminal.TruncateOutput(res.Output, h.maxMsgLen)
-	h.send(ctx, b, chatID, formatRun(raw, res))
+
+	_, _ = b.SendChatAction(ctx, &tg.SendChatActionParams{ChatID: chatID, Action: models.ChatActionTyping})
+	h.send(ctx, b, chatID, formatRun(raw, terminal.Result{
+		Output:   display,
+		ExitCode: 0,
+	}))
 }
 
 func (h *Handler) authorizeCommand(st *session.State, isOwner bool, raw string) (string, bool) {
@@ -221,6 +325,56 @@ func (h *Handler) effectiveCwd(st *session.State) string {
 		return wd
 	}
 	return ""
+}
+
+func (h *Handler) getShell(st *session.State) (*terminal.Shell, error) {
+	h.shellMu.Lock()
+	defer h.shellMu.Unlock()
+	if s, ok := h.shells[st.ID]; ok {
+		if s.IsAlive() {
+			return s, nil
+		}
+		delete(h.shells, st.ID)
+	}
+	var env []string
+	if st.Project != "" {
+		env = append(env, "TERMILINK_PROJECT="+st.Project)
+	}
+	if h.runner == nil {
+		return nil, errors.New("no terminal runner configured")
+	}
+	s, err := h.runner.OpenShell(st.Cwd, env)
+	if err != nil {
+		return nil, err
+	}
+	h.shells[st.ID] = s
+	return s, nil
+}
+
+func (h *Handler) shellFor(id string) *terminal.Shell {
+	h.shellMu.Lock()
+	defer h.shellMu.Unlock()
+	return h.shells[id]
+}
+
+func (h *Handler) closeShellFor(id string) {
+	h.shellMu.Lock()
+	s := h.shells[id]
+	delete(h.shells, id)
+	h.shellMu.Unlock()
+	if s != nil {
+		_ = s.Close()
+	}
+}
+
+func (h *Handler) Close() {
+	h.shellMu.Lock()
+	shells := h.shells
+	h.shells = map[string]*terminal.Shell{}
+	h.shellMu.Unlock()
+	for _, s := range shells {
+		_ = s.Close()
+	}
 }
 
 func (h *Handler) resolve(st *session.State, raw string) (string, bool) {
@@ -309,11 +463,4 @@ func (h *Handler) send(ctx context.Context, b *tg.Bot, chatID int64, text string
 
 func (h *Handler) sendPlain(ctx context.Context, b *tg.Bot, chatID int64, text string) {
 	_, _ = b.SendMessage(ctx, &tg.SendMessageParams{ChatID: chatID, Text: text})
-}
-
-func firstLine(s string) string {
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		return strings.TrimSpace(s[:i])
-	}
-	return strings.TrimSpace(s)
 }

@@ -41,6 +41,10 @@ func NewRunner(shell string, timeout time.Duration, maxOutput int) *Runner {
 	return &Runner{shell: shell, timeout: timeout, maxOutput: maxOutput}
 }
 
+func (r *Runner) CommandTimeout() time.Duration {
+	return r.timeout
+}
+
 func (r *Runner) Execute(ctx context.Context, dir string, command string, onChunk func(Chunk)) (Result, error) {
 	if r.shell == "" {
 		return Result{}, fmt.Errorf("terminal: no shell configured")

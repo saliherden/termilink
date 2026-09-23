@@ -51,3 +51,24 @@ func TestRemove(t *testing.T) {
 		t.Fatal("expected removal")
 	}
 }
+
+func TestRuntimeFieldsNotPersisted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	m := NewManagerWithStateFile(path)
+	s := m.Ensure("chat1")
+	s.Active = true
+	s.PID = 4242
+	m.Save()
+
+	m2 := NewManagerWithStateFile(path)
+	got, ok := m2.Get("chat1")
+	if !ok {
+		t.Fatal("state not reloaded")
+	}
+	if got.Active {
+		t.Fatal("Active must not survive a restart (stale lock bug)")
+	}
+	if got.PID != 0 {
+		t.Fatalf("PID must not survive a restart, got %d", got.PID)
+	}
+}

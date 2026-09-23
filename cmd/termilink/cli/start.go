@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/saliherden/termilink/internal/instance"
 	"github.com/saliherden/termilink/internal/service"
 )
 
@@ -22,6 +23,12 @@ func newStartCmd(configPath *string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			release, err := instance.Acquire(instance.DefaultLockPath())
+			if err != nil {
+				return err
+			}
+			defer func() { _ = release() }()
 
 			logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 			s, err := service.New(cfg, logger)

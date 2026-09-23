@@ -8,17 +8,18 @@ import (
 	tg "github.com/go-telegram/bot"
 
 	"github.com/saliherden/termilink/internal/config"
-	"github.com/saliherden/termilink/internal/session"
 	"github.com/saliherden/termilink/internal/security"
+	"github.com/saliherden/termilink/internal/session"
 	"github.com/saliherden/termilink/internal/telegram"
 	"github.com/saliherden/termilink/internal/terminal"
 )
 
 type Service struct {
-	cfg     *config.Config
-	bot     *tg.Bot
-	logger  *slog.Logger
+	cfg      *config.Config
+	bot      *tg.Bot
+	logger   *slog.Logger
 	sessions *session.Manager
+	handler  *telegram.Handler
 }
 
 func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
@@ -39,6 +40,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		Runner:     runner,
 		Sessions:   sessions,
 		Projects:   cfg.Projects,
+		Timeout:    cfg.Terminal.CommandTimeout.Std(),
 		Logger:     logger,
 	})
 
@@ -52,6 +54,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		bot:      bot,
 		logger:   logger,
 		sessions: sessions,
+		handler:  handler,
 	}, nil
 }
 
@@ -61,6 +64,7 @@ func (s *Service) Run(ctx context.Context) error {
 		"projects", len(s.cfg.Projects),
 		"shell", s.cfg.Terminal.Shell,
 	)
+	defer s.handler.Close()
 	s.bot.Start(ctx)
 	s.sessions.Save()
 	s.logger.Info("termilink agent stopped")

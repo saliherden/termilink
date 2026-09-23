@@ -31,10 +31,10 @@ func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
 func (d Duration) Std() time.Duration { return time.Duration(d) }
 
 type Config struct {
-	Telegram  TelegramConfig  `yaml:"telegram"`
-	Security  SecurityConfig  `yaml:"security"`
-	Workspace WorkspaceConfig `yaml:"workspace"`
-	Terminal  TerminalConfig  `yaml:"terminal"`
+	Telegram  TelegramConfig           `yaml:"telegram"`
+	Security  SecurityConfig           `yaml:"security"`
+	Workspace WorkspaceConfig          `yaml:"workspace"`
+	Terminal  TerminalConfig           `yaml:"terminal"`
 	Projects  map[string]ProjectConfig `yaml:"projects"`
 
 	// Path of the loaded configuration file. Not serialized.
