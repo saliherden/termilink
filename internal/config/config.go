@@ -48,6 +48,10 @@ type TelegramConfig struct {
 type SecurityConfig struct {
 	Owner        int64   `yaml:"owner"`
 	AllowedUsers []int64 `yaml:"allowed_users"`
+	// ApproveDangerous gates destructive commands behind chat approval.
+	// Values: "all" (default), "worker", "off".
+	ApproveDangerous  string   `yaml:"approve_dangerous"`
+	DangerousPatterns []string `yaml:"dangerous_patterns,omitempty"`
 }
 
 type WorkspaceConfig struct {
@@ -108,6 +112,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("security.allowed_users must contain at least one Telegram user id")
 	}
 	c.resolveOwner()
+	switch c.Security.ApproveDangerous {
+	case "", "all", "worker", "off":
+	default:
+		return fmt.Errorf("security.approve_dangerous must be one of all, worker, off (got %q)", c.Security.ApproveDangerous)
+	}
 	if c.Terminal.Shell == "" {
 		return fmt.Errorf("terminal.shell must not be empty")
 	}

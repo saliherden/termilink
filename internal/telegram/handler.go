@@ -26,10 +26,18 @@ const (
 	defaultMaxMsgLen  = 3500
 	msgMaxLength      = 4096
 	defaultCmdTimeout = 30 * time.Minute
+	approvalTTL       = 2 * time.Minute
 )
+
+type pendingApproval struct {
+	userID  int64
+	raw     string
+	expires time.Time
+}
 
 type Handler struct {
 	authorizer *security.Authorizer
+	policy     *security.Policy
 	runner     *terminal.Runner
 	sessions   *session.Manager
 	projects   map[string]config.ProjectConfig
@@ -39,10 +47,14 @@ type Handler struct {
 
 	shellMu sync.Mutex
 	shells  map[string]*terminal.Shell
+
+	pendingMu sync.Mutex
+	pending   map[int64]pendingApproval
 }
 
 type Options struct {
 	Authorizer *security.Authorizer
+	Policy     *security.Policy
 	Runner     *terminal.Runner
 	Sessions   *session.Manager
 	Projects   map[string]config.ProjectConfig
@@ -54,6 +66,7 @@ type Options struct {
 func NewHandler(opts Options) *Handler {
 	h := &Handler{
 		authorizer: opts.Authorizer,
+		policy:     opts.Policy,
 		runner:     opts.Runner,
 		sessions:   opts.Sessions,
 		projects:   opts.Projects,
@@ -61,6 +74,7 @@ func NewHandler(opts Options) *Handler {
 		timeout:    opts.Timeout,
 		log:        opts.Logger,
 		shells:     map[string]*terminal.Shell{},
+		pending:    map[int64]pendingApproval{},
 	}
 	if h.maxMsgLen <= 0 || h.maxMsgLen > msgMaxLength {
 		h.maxMsgLen = defaultMaxMsgLen
@@ -106,13 +120,91 @@ func (h *Handler) handle(ctx context.Context, b *tg.Bot, chatID int64, userID in
 	st := h.sessions.Ensure(strconv.FormatInt(chatID, 10))
 
 	if strings.HasPrefix(text, "/") {
-		h.handleCommand(ctx, b, chatID, st, text)
+		h.handleCommand(ctx, b, chatID, userID, st, text)
+		return
+	}
+	if h.pendingApprovalFor(chatID) != nil {
+		h.resolveApproval(ctx, b, chatID, userID, st, text)
+		return
+	}
+	h.maybeApproveAndRun(ctx, b, chatID, userID, st, text)
+}
+
+func (h *Handler) maybeApproveAndRun(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, text string) {
+	if h.policy != nil && h.policy.NeedsApproval(h.authorizer.IsOwner(userID), text) {
+		h.pendingMu.Lock()
+		h.pending[chatID] = pendingApproval{userID: userID, raw: text, expires: time.Now().Add(approvalTTL)}
+		h.pendingMu.Unlock()
+		h.send(ctx, b, chatID, formatApprovalPrompt(text, approvalTTL))
 		return
 	}
 	h.runCommand(ctx, b, chatID, userID, st, text)
 }
 
-func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, st *session.State, text string) {
+func (h *Handler) pendingApprovalFor(chatID int64) *pendingApproval {
+	h.pendingMu.Lock()
+	defer h.pendingMu.Unlock()
+	req, ok := h.pending[chatID]
+	if !ok {
+		return nil
+	}
+	if time.Now().After(req.expires) {
+		delete(h.pending, chatID)
+		return nil
+	}
+	return &req
+}
+
+func (h *Handler) resolveApproval(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, text string) {
+	h.pendingMu.Lock()
+	req, ok := h.pending[chatID]
+	if ok {
+		delete(h.pending, chatID)
+	}
+	h.pendingMu.Unlock()
+	if !ok || time.Now().After(req.expires) {
+		h.send(ctx, b, chatID, formatApprovalTimeout())
+		return
+	}
+	if !h.authorizer.IsOwner(userID) {
+		h.pendingMu.Lock()
+		h.pending[chatID] = req
+		h.pendingMu.Unlock()
+		h.send(ctx, b, chatID, "🔒 Only the owner can approve or reject a dangerous command.")
+		return
+	}
+	switch approvalVerdict(text) {
+	case answerApprove:
+		h.runCommand(ctx, b, chatID, req.userID, st, req.raw)
+	case answerDeny:
+		h.sendPlain(ctx, b, chatID, "❌ Rejected, the command was not executed.")
+	default:
+		h.pendingMu.Lock()
+		h.pending[chatID] = req
+		h.pendingMu.Unlock()
+		h.send(ctx, b, chatID, formatApprovalStillPending(req.raw))
+	}
+}
+
+type approvalAnswer int
+
+const (
+	answerUnknown approvalAnswer = iota
+	answerApprove
+	answerDeny
+)
+
+func approvalVerdict(text string) approvalAnswer {
+	switch strings.ToLower(strings.TrimSpace(text)) {
+	case "evet", "yes", "ok", "onay", "onayla":
+		return answerApprove
+	case "hayir", "hayır", "no", "cancel", "iptal", "reddet":
+		return answerDeny
+	}
+	return answerUnknown
+}
+
+func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, text string) {
 	fields := strings.Fields(text)
 	name := strings.TrimPrefix(fields[0], "/")
 	if i := strings.Index(name, "@"); i >= 0 {
@@ -130,7 +222,7 @@ func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, st
 	case "projects":
 		h.send(ctx, b, chatID, formatProjects(h.projectNames()))
 	case "project":
-		h.handleProject(ctx, b, chatID, st, args)
+		h.handleProject(ctx, b, chatID, userID, st, args)
 	case "status":
 		h.send(ctx, b, chatID, h.formatSessionStatus(st))
 	case "sessions":
@@ -146,7 +238,7 @@ func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, st
 	}
 }
 
-func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, st *session.State, args []string) {
+func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, args []string) {
 	if len(args) == 0 {
 		h.send(ctx, b, chatID, formatProjects(h.projectNames()))
 		return
@@ -159,6 +251,11 @@ func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, st
 	}
 	if _, err := os.Stat(p.Path); err != nil {
 		h.send(ctx, b, chatID, formatErr("project path not reachable: "+p.Path))
+		return
+	}
+	wks := h.policy != nil && !h.policy.WorkspaceEmpty()
+	if wks && !h.authorizer.IsOwner(userID) && !h.policy.InWorkspace(p.Path) {
+		h.send(ctx, b, chatID, formatErr("project path is outside the allowed workspace: "+p.Path))
 		return
 	}
 	h.closeShellFor(st.ID)
@@ -310,7 +407,57 @@ func (h *Handler) authorizeCommand(st *session.State, isOwner bool, raw string) 
 	if st.Project == "" {
 		return "select a project first with /project <name>.", false
 	}
+	if reason, blocked := h.workspaceVet(raw); blocked {
+		return reason, false
+	}
 	return "", true
+}
+
+// workspaceVet is a policy-level (not an OS sandbox) guard for workers: when
+// workspace.allowed roots are configured, obvious out-of-scope absolute / ~ /
+// $HOME paths are rejected. Relative paths and shell expansion can still
+// escape; this is best-effort and documented as such.
+func (h *Handler) workspaceVet(raw string) (string, bool) {
+	p := h.policy
+	if p == nil || p.WorkspaceEmpty() {
+		return "", false
+	}
+	for _, tok := range strings.Fields(raw) {
+		tok = strings.Trim(tok, `"'`)
+		tok = strings.TrimRight(tok, ",;()|&<>")
+		if tok == ".." || strings.HasPrefix(tok, "../") {
+			return "⛔ workspace: `..` escapes are not allowed for workers.", true
+		}
+		path, ok := expandPathCandidate(tok)
+		if !ok {
+			continue
+		}
+		if p.InWorkspace(path) {
+			continue
+		}
+		return "⛔ workspace: `" + escapeCode(tok) + "` is outside the allowed workspace.", true
+	}
+	return "", false
+}
+
+func expandPathCandidate(tok string) (string, bool) {
+	switch {
+	case strings.HasPrefix(tok, "~"):
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "$HOME"
+		}
+		return filepath.Clean(home + strings.TrimPrefix(tok, "~")), true
+	case strings.HasPrefix(tok, "$HOME/"):
+		home, err := os.UserHomeDir()
+		if err != nil {
+			home = "$HOME"
+		}
+		return filepath.Clean(home + strings.TrimPrefix(tok, "$HOME")), true
+	case strings.HasPrefix(tok, "/"):
+		return filepath.Clean(tok), true
+	}
+	return "", false
 }
 
 func isCdCommand(raw string) bool {

@@ -28,6 +28,10 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 	}
 
 	authorizer := security.New(cfg.Security.Owner, cfg.Security.AllowedUsers)
+	policy, err := security.NewPolicy(cfg.Security.ApproveDangerous, cfg.Security.DangerousPatterns, cfg.Workspace.Allowed)
+	if err != nil {
+		return nil, fmt.Errorf("build security policy: %w", err)
+	}
 	runner := terminal.NewRunner(
 		cfg.Terminal.Shell,
 		cfg.Terminal.CommandTimeout.Std(),
@@ -37,6 +41,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 
 	handler := telegram.NewHandler(telegram.Options{
 		Authorizer: authorizer,
+		Policy:     policy,
 		Runner:     runner,
 		Sessions:   sessions,
 		Projects:   cfg.Projects,

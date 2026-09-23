@@ -17,6 +17,14 @@ security:
   allowed_users:
     - 123456789
 
+  # Gate destructive commands (rm -rf /, dd to /dev, sudo, shutdown, ...)
+  # behind a chat approval. Values: all (default), worker, off.
+  approve_dangerous: all
+
+  # Optional extra regex patterns that also trigger approval:
+  # dangerous_patterns:
+  #   - "git\\s+push\\s+(--force|-f)"
+
 workspace:
   # Optional: restrict filesystem access to these roots.
   allowed:
