@@ -1,0 +1,24 @@
+# Internal / personal documents - not for end users
+project.md
+docs/
+
+# Secrets
+.env
+*.env
+.env.local
+config.yaml
+
+# Build artifacts
+/termilink
+/tmp/
+*.test
+*.out
+*.log
+termilink.pid
+
+# Go
+vendor/
+dist/
+
+# macOS
+.DS_Store

@@ -1,0 +1,40 @@
+# TermiLink configuration example.
+# Copy to config.yaml and adjust. Secrets may be supplied via environment
+# variables (see .env.example) instead of being written here.
+
+telegram:
+  # Either put the token here directly or use ${TELEGRAM_BOT_TOKEN}.
+  bot_token: ${TELEGRAM_BOT_TOKEN}
+
+security:
+  # Owner has full access (free cd anywhere). If unset, the first
+  # allowed_user becomes the owner. All other allowed_users are workers:
+  # they can only switch between configured projects and run commands
+  # inside the selected project.
+  owner: 123456789
+
+  # Telegram user IDs allowed to execute commands. At least one is required.
+  allowed_users:
+    - 123456789
+
+workspace:
+  # Optional: restrict filesystem access to these roots.
+  allowed:
+    - /Users/user/projects
+
+terminal:
+  shell: /bin/zsh
+  command_timeout: 30m
+  max_output_bytes: 1048576
+
+projects:
+  #   api:
+  #     path: /Users/user/projects/api
+  #     commands:
+  #       dev: npm run dev
+  #       build: npm run build
+  #     artifacts:
+  #       - dist
+  #
+  #   mobile:
+  #     path: /Users/user/projects/mobile-example
