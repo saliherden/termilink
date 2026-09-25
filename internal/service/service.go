@@ -7,6 +7,7 @@ import (
 
 	tg "github.com/go-telegram/bot"
 
+	"github.com/saliherden/termilink/internal/audit"
 	"github.com/saliherden/termilink/internal/config"
 	"github.com/saliherden/termilink/internal/security"
 	"github.com/saliherden/termilink/internal/session"
@@ -20,6 +21,7 @@ type Service struct {
 	logger   *slog.Logger
 	sessions *session.Manager
 	handler  *telegram.Handler
+	audit    *audit.Logger
 }
 
 func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
@@ -39,6 +41,11 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 	)
 	sessions := session.NewManagerWithStateFile(session.DefaultStateFile())
 
+	auditLogger, err := newAuditLogger(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("open audit log: %w", err)
+	}
+
 	handler := telegram.NewHandler(telegram.Options{
 		Authorizer: authorizer,
 		Policy:     policy,
@@ -47,6 +54,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		Projects:   cfg.Projects,
 		Timeout:    cfg.Terminal.CommandTimeout.Std(),
 		Logger:     logger,
+		Audit:      auditLogger,
 	})
 
 	bot, err := tg.New(cfg.Telegram.BotToken, tg.WithDefaultHandler(handler.Callback()))
@@ -60,6 +68,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		logger:   logger,
 		sessions: sessions,
 		handler:  handler,
+		audit:    auditLogger,
 	}, nil
 }
 
@@ -68,10 +77,29 @@ func (s *Service) Run(ctx context.Context) error {
 		"allowed_users", len(s.cfg.Security.AllowedUsers),
 		"projects", len(s.cfg.Projects),
 		"shell", s.cfg.Terminal.Shell,
+		"audit", s.auditPath(),
 	)
 	defer s.handler.Close()
 	s.bot.Start(ctx)
 	s.sessions.Save()
 	s.logger.Info("termilink agent stopped")
 	return nil
+}
+
+// auditPath returns the configured audit log path for logging purposes, or
+// "off" when auditing is disabled.
+func (s *Service) auditPath() string {
+	if s.audit == nil {
+		return "off"
+	}
+	return s.audit.Path()
+}
+
+// newAuditLogger builds the audit logger from config. An empty audit_log
+// resolves to the default location; "off" disables auditing (nil logger).
+func newAuditLogger(cfg *config.Config) (*audit.Logger, error) {
+	if cfg.Security.AuditLog == "off" {
+		return nil, nil
+	}
+	return audit.Open(cfg.Security.AuditLog)
 }

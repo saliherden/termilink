@@ -25,6 +25,11 @@ security:
   # dangerous_patterns:
   #   - "git\\s+push\\s+(--force|-f)"
 
+  # Write a JSONL audit trail of security-sensitive events (commands, approvals,
+  # blocked access, project switches, ...). Empty = default
+  # ~/.termilink/audit.log; "off" disables it.
+  # audit_log: /absolute/path/to/audit.log
+
 workspace:
   # Optional: restrict filesystem access to these roots.
   allowed:

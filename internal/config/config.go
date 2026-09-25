@@ -52,6 +52,9 @@ type SecurityConfig struct {
 	// Values: "all" (default), "worker", "off".
 	ApproveDangerous  string   `yaml:"approve_dangerous"`
 	DangerousPatterns []string `yaml:"dangerous_patterns,omitempty"`
+	// AuditLog writes a JSONL audit trail of security-sensitive events.
+	// Empty uses the default (~/.termilink/audit.log); "off" disables it.
+	AuditLog string `yaml:"audit_log"`
 }
 
 type WorkspaceConfig struct {

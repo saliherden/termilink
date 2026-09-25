@@ -126,6 +126,32 @@ the allowed roots. The owner is never bound by this policy.
 Note: this is a **policy-level guard, not an OS sandbox** — relative paths and
 shell expansions are trusted to the user, and the owner is fully trusted.
 
+### Audit logging
+
+```yaml
+security:
+  audit_log: ""   # empty = ~/.termilink/audit.log, "off" disables, or a path
+```
+
+Every security-sensitive event is appended to the audit file as one JSON line
+per event: commands (with result, duration and exit state), the danger-approval
+flow (requested / approved / rejected / blocked / timeout), whitelist
+rejections, workspace vet blocks, project switches, `/input`, `/stop` and
+`/exit`. Obvious secret values in commands (`password=…`, `token=…`,
+`Authorization: Bearer …`, …) are written as `***redacted***`; the executed
+command is never modified.
+
+Read recent entries with:
+
+```bash
+termilink audit          # last 20 entries, human-readable
+termilink audit -n 100   # last 100 entries
+termilink audit --json   # raw JSON lines, e.g. for machine processing
+```
+
+Auditing never takes the agent down — write errors are reported once to stderr
+and ignored. `security.audit_log: off` disables it entirely.
+
 ## CLI
 
 ```bash
@@ -134,6 +160,7 @@ termilink status       # show runtime status
 termilink config       # show resolved configuration
 termilink projects     # list configured projects
 termilink sessions     # list active sessions
+termilink audit        # show recent audit log entries
 termilink init         # scaffold a config file
 ```
 

@@ -16,6 +16,7 @@ import (
 	tg "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/saliherden/termilink/internal/audit"
 	"github.com/saliherden/termilink/internal/config"
 	"github.com/saliherden/termilink/internal/security"
 	"github.com/saliherden/termilink/internal/session"
@@ -44,6 +45,7 @@ type Handler struct {
 	maxMsgLen  int
 	timeout    time.Duration
 	log        *slog.Logger
+	audit      *audit.Logger
 
 	shellMu sync.Mutex
 	shells  map[string]*terminal.Shell
@@ -61,6 +63,7 @@ type Options struct {
 	MaxMsgLen  int
 	Timeout    time.Duration
 	Logger     *slog.Logger
+	Audit      *audit.Logger
 }
 
 func NewHandler(opts Options) *Handler {
@@ -73,6 +76,7 @@ func NewHandler(opts Options) *Handler {
 		maxMsgLen:  opts.MaxMsgLen,
 		timeout:    opts.Timeout,
 		log:        opts.Logger,
+		audit:      opts.Audit,
 		shells:     map[string]*terminal.Shell{},
 		pending:    map[int64]pendingApproval{},
 	}
@@ -98,6 +102,40 @@ func (h *Handler) commandTimeout() time.Duration {
 	return defaultCmdTimeout
 }
 
+// auditEvent is a nil-safe wrapper around the audit logger.
+func (h *Handler) auditEvent(e audit.Entry) {
+	if h.audit == nil {
+		return
+	}
+	h.audit.Audit(e)
+}
+
+// entryFor builds a redacted audit entry from chat/user context.
+func entryFor(chatID, userID int64, owner bool, action, raw string) audit.Entry {
+	return audit.Entry{
+		Time:   time.Now(),
+		ChatID: chatID,
+		UserID: userID,
+		Owner:  owner,
+		Action: action,
+		Cmd:    audit.Redact(raw),
+	}
+}
+
+// auditActionForDenial maps a denial reason to its audit action.
+func auditActionForDenial(reason string) string {
+	if strings.HasPrefix(reason, "⛔ workspace:") {
+		return audit.ActionVetBlocked
+	}
+	return audit.ActionAccessDenied
+}
+
+// rejectUnauthorized records a whitelist rejection in the log and audit trail.
+func (h *Handler) rejectUnauthorized(userID, chatID int64, text string) {
+	h.log.Warn("rejected unauthorized message", "user_id", userID, "chat_id", chatID)
+	h.auditEvent(entryFor(chatID, userID, false, audit.ActionAccessDenied, text))
+}
+
 func (h *Handler) Callback() tg.HandlerFunc {
 	return func(ctx context.Context, b *tg.Bot, update *models.Update) {
 		if update.Message == nil || update.Message.From == nil {
@@ -105,7 +143,7 @@ func (h *Handler) Callback() tg.HandlerFunc {
 		}
 		msg := update.Message
 		if !h.authorizer.IsAllowed(msg.From.ID) {
-			h.log.Warn("rejected unauthorized message", "user_id", msg.From.ID, "chat_id", msg.Chat.ID)
+			h.rejectUnauthorized(msg.From.ID, msg.Chat.ID, msg.Text)
 			return
 		}
 		text := strings.TrimSpace(msg.Text)
@@ -135,6 +173,7 @@ func (h *Handler) maybeApproveAndRun(ctx context.Context, b *tg.Bot, chatID int6
 		h.pendingMu.Lock()
 		h.pending[chatID] = pendingApproval{userID: userID, raw: text, expires: time.Now().Add(approvalTTL)}
 		h.pendingMu.Unlock()
+		h.auditEvent(entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionApprovalReq, text))
 		h.send(ctx, b, chatID, formatApprovalPrompt(text, approvalTTL))
 		return
 	}
@@ -163,6 +202,7 @@ func (h *Handler) resolveApproval(ctx context.Context, b *tg.Bot, chatID int64, 
 	}
 	h.pendingMu.Unlock()
 	if !ok || time.Now().After(req.expires) {
+		h.auditEvent(entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionApprovalTimed, req.raw))
 		h.send(ctx, b, chatID, formatApprovalTimeout())
 		return
 	}
@@ -170,13 +210,16 @@ func (h *Handler) resolveApproval(ctx context.Context, b *tg.Bot, chatID int64, 
 		h.pendingMu.Lock()
 		h.pending[chatID] = req
 		h.pendingMu.Unlock()
+		h.auditEvent(entryFor(chatID, userID, false, audit.ActionApprovalBlock, req.raw))
 		h.send(ctx, b, chatID, "🔒 Only the owner can approve or reject a dangerous command.")
 		return
 	}
 	switch approvalVerdict(text) {
 	case answerApprove:
+		h.auditEvent(entryFor(chatID, userID, true, audit.ActionApprovalOK, req.raw))
 		h.runCommand(ctx, b, chatID, req.userID, st, req.raw)
 	case answerDeny:
+		h.auditEvent(entryFor(chatID, userID, true, audit.ActionApprovalNo, req.raw))
 		h.sendPlain(ctx, b, chatID, "❌ Rejected, the command was not executed.")
 	default:
 		h.pendingMu.Lock()
@@ -228,11 +271,11 @@ func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, us
 	case "sessions":
 		h.send(ctx, b, chatID, formatSessions(h.sessionRows()))
 	case "input":
-		h.handleInput(ctx, b, chatID, st, args)
+		h.handleInput(ctx, b, chatID, userID, st, args)
 	case "stop":
-		h.handleStop(ctx, b, chatID, st)
+		h.handleStop(ctx, b, chatID, userID, st)
 	case "exit":
-		h.handleExit(ctx, b, chatID, st)
+		h.handleExit(ctx, b, chatID, userID, st)
 	default:
 		h.send(ctx, b, chatID, unknown)
 	}
@@ -263,6 +306,10 @@ func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, us
 	st.Project = name
 	h.sessions.Save()
 
+	e := entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionProjectSwitch, name)
+	e.Detail = p.Path
+	h.auditEvent(e)
+
 	cmdNames := make([]string, 0, len(p.Commands))
 	for k := range p.Commands {
 		cmdNames = append(cmdNames, k)
@@ -270,7 +317,7 @@ func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, us
 	h.send(ctx, b, chatID, formatProjectHome(name, p.Path, cmdNames))
 }
 
-func (h *Handler) handleInput(ctx context.Context, b *tg.Bot, chatID int64, st *session.State, args []string) {
+func (h *Handler) handleInput(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, args []string) {
 	shell := h.shellFor(st.ID)
 	if shell == nil || !shell.IsAlive() {
 		h.send(ctx, b, chatID, formatErr("no active shell; send a command first."))
@@ -297,22 +344,25 @@ func (h *Handler) handleInput(ctx context.Context, b *tg.Bot, chatID int64, st *
 		h.send(ctx, b, chatID, formatErr("failed to write to shell: "+err.Error()))
 		return
 	}
+	h.auditEvent(entryFor(chatID, userID, false, audit.ActionInput, text))
 	h.sendPlain(ctx, b, chatID, "📥 Input sent.")
 }
 
-func (h *Handler) handleStop(ctx context.Context, b *tg.Bot, chatID int64, st *session.State) {
+func (h *Handler) handleStop(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State) {
 	shell := h.shellFor(st.ID)
 	if !st.Active || shell == nil || !shell.IsAlive() {
 		h.sendPlain(ctx, b, chatID, "⏹ No command is running.")
 		return
 	}
+	h.auditEvent(entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionStop, ""))
 	_ = shell.Stop()
 }
 
-func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, st *session.State) {
+func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State) {
 	h.closeShellFor(st.ID)
 	st.Active = false
 	h.sessions.Save()
+	h.auditEvent(entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionExit, ""))
 	h.sendPlain(ctx, b, chatID, "🗑 Shell closed.")
 }
 
@@ -337,10 +387,16 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 		h.send(ctx, b, chatID, formatErr("a command is already running in this session; use /stop to interrupt it."))
 		return
 	}
-	if reason, ok := h.authorizeCommand(st, h.authorizer.IsOwner(userID), raw); !ok {
+	isOwner := h.authorizer.IsOwner(userID)
+	if reason, ok := h.authorizeCommand(st, isOwner, raw); !ok {
+		e := entryFor(chatID, userID, isOwner, auditActionForDenial(reason), raw)
+		e.Detail = reason
+		h.auditEvent(e)
 		h.send(ctx, b, chatID, formatErr(reason))
 		return
 	}
+
+	h.auditEvent(entryFor(chatID, userID, isOwner, audit.ActionCommand, raw))
 
 	command, isCd := h.resolve(st, raw)
 	shell, err := h.getShell(st)
@@ -360,7 +416,23 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 		h.sessions.Save()
 	}()
 
+	started := time.Now()
 	res, err := shell.ExecCommand(runCtx, command)
+	durMS := time.Since(started).Milliseconds()
+
+	resEntry := entryFor(chatID, userID, isOwner, audit.ActionCommandResult, raw)
+	resEntry.DurMS = durMS
+	resEntry.OK = audit.Bool(err == nil)
+	switch {
+	case err == nil:
+	case errors.Is(err, context.DeadlineExceeded):
+		resEntry.Err = "timeout"
+	case errors.Is(err, terminal.ErrInterrupted):
+		resEntry.Err = "interrupted"
+	default:
+		resEntry.Err = err.Error()
+	}
+	h.auditEvent(resEntry)
 
 	if pwd := terminal.ParsePWD(res); pwd != "" {
 		st.Cwd = pwd
