@@ -46,6 +46,11 @@ type TelegramConfig struct {
 	// MaxFileBytes caps file transfers (get / auto-upload). Default: 50 MiB,
 	// Telegram's document upload limit.
 	MaxFileBytes int64 `yaml:"max_file_bytes"`
+	// BigFileLinkHost enables delivering files that are too big for Telegram
+	// through a temporary anonymous link (host upload + link message). Values:
+	// "" (disabled, default), "uguu.se" (auto-deletes after ~3 hours),
+	// "catbox.moe" (up to 200 MB, persists until purged).
+	BigFileLinkHost string `yaml:"big_file_link_host"`
 }
 
 type SecurityConfig struct {
@@ -131,6 +136,11 @@ func (c *Config) Validate() error {
 	}
 	if c.Telegram.MaxFileBytes <= 0 {
 		return fmt.Errorf("telegram.max_file_bytes must be a positive number of bytes")
+	}
+	switch c.Telegram.BigFileLinkHost {
+	case "", "uguu.se", "catbox.moe":
+	default:
+		return fmt.Errorf("telegram.big_file_link_host must be one of uguu.se, catbox.moe (got %q)", c.Telegram.BigFileLinkHost)
 	}
 	return nil
 }

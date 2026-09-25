@@ -154,12 +154,12 @@ func formatInterrupted(cmd, out string) string {
 
 func formatApprovalPrompt(raw string, ttl time.Duration) string {
 	return fmt.Sprintf(
-		"⚠️ Dangerous command detected:\n`%s`\n\nReply with *evet* to approve or *hayır* to reject (%s).\nThe command will not run until approved.",
+		"⚠️ Dangerous command detected:\n`%s`\n\nReply with *yes* / *evet* / *ok* to approve or *no* / *hayır* to reject (%s).\nThe command will not run until approved.",
 		escapeCode(raw), ttl.Round(time.Second))
 }
 
 func formatApprovalStillPending(raw string) string {
-	return fmt.Sprintf("⏳ Approval pending for:\n`%s`\n\nReply with *evet* or *hayır*.", escapeCode(raw))
+	return fmt.Sprintf("⏳ Approval pending for:\n`%s`\n\nReply with *yes* or *no*.", escapeCode(raw))
 }
 
 func formatApprovalTimeout() string {

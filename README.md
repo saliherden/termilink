@@ -25,8 +25,9 @@ dangerous-command approval, workspace policy, single-instance guard) are active.
 - **Dangerous-command approval** — destructive commands are not executed until
   an owner approves them in chat.
 - **Workspace policy** — optionally restrict workers to a set of allowed roots.
-- **Files & artifacts** — `get` delivers build artifacts or single files (with
-  zip fallback for oversized files); sent documents are auto-saved.
+- **Files & artifacts** — `get` delivers build artifacts or single files
+  (zip fallback, plus owner-approved anonymous-link delivery for files beyond
+  Telegram's 50 MB); sent documents are auto-saved.
 - **Audit logging** — every command, approval, denial and file transfer is
   written to an append-only JSONL log.
 - **Single instance** — a PID lock prevents running two gateways at once.
@@ -88,7 +89,8 @@ file (`./x`, `~/x`, `…/x`, absolute), it's a File. Anything else (`debug`,
 release/14` finds `release/14.apk` even though it contains a slash.
 
 `get` also works as `/get` — both spellings are accepted. Note: if a project
-defines a command shortcut named `get`, file fetching wins.
+defines a command shortcut named `get`, file fetching wins. Files that still
+exceed the sending limit are offered as a temporary link — see **Size limits**.
 
 ### Artifacts (build outputs)
 
@@ -114,13 +116,35 @@ suffix (`notes.md` → `notes-1.md`). Workers must select a project first.
 
 ### Size limits
 
+Telegram lets bots send single documents up to **50 MB**. TermiLink handles
+bigger files like this:
+
 ```yaml
 telegram:
-  max_file_bytes: 52428800   # upload/download cap, default 50 MB
+  max_file_bytes: 52428800      # zip decision / upload cap, default 50 MB
+  big_file_link_host: uguu.se   # "" (off) | uguu.se | catbox.moe
 ```
 
-- **Sending:** a file over the limit is zipped on the fly first. If it still
-  exceeds the limit, a clear error is returned (raw / zipped sizes shown).
+- **≤ 50 MB** → sent directly as a document.
+- **> 50 MB** → zipped on the fly first; if the archive fits, it is sent as
+  one document (nice for logs, dumps, text).
+- **Still > 50 MB** → needs `big_file_link_host` to be set. The file is then
+  queued behind an **owner approval** in chat — the bot asks *"File exceeds
+  Telegram's 50MB sending limit. Send it via a temporary link on `<host>`?"*
+  Confirming with `yes` / `evet` / `ok` uploads a **`.tar` archive** of the
+  file (so restricted types like `.apk` pass, and retention still applies)
+  and posts the download link as a message (tap and save on your phone).
+- **`big_file_link_host` blank** → the clear size error is kept, nothing
+  leaves the machine.
+
+Link retention: `uguu.se` auto-deletes after ~3 hours (accepts up to ~128 MB
+per file); `catbox.moe` persists (up to 200 MB, may be purged after long
+inactivity). `.apk` and other
+restricted types are rejected by uguu — the `.tar` envelope handles that.
+⚠️ While active, the link is **public** (unguessable URL) — never send
+confidential files this way. Every step is audited (`approval_*`,
+`file_link`).
+
 - **Uploading:** a document over the limit is rejected with a clear message.
 
 ### Long command output
@@ -154,10 +178,11 @@ security:
 
 When a message matches a dangerous pattern it is **queued, not executed**:
 
-1. Bot replies: `⚠️ Dangerous command detected: … — reply evet to approve or
-   hayır to reject (2m0s). The command will not run until approved.`
-2. **Owner** replies `evet` (or `yes` / `ok` / `onay`) → the command runs.
-   `hayır` (or `no` / `cancel` / `iptal`) → rejected, **never executed**.
+1. Bot replies: `⚠️ Dangerous command detected: … — reply yes / evet / ok to
+   approve or no / hayır to reject (2m0s). The command will not run until
+   approved.`
+2. **Owner** replies `yes` (or `evet` / `ok` / `onay`) → the command runs.
+   `no` (or `hayır` / `cancel` / `iptal`) → rejected, **never executed**.
 3. Any other reply keeps the request pending. If no decision arrives within 2
    minutes the request expires — the command is **not executed**.
 

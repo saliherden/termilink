@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"context"
 	"crypto/rand"
@@ -175,7 +176,40 @@ func TestZipToTemp(t *testing.T) {
 	}
 }
 
-func TestSendFileWithZipFallbackTooBig(t *testing.T) {
+func TestTarToTemp(t *testing.T) {
+	tmp := filepath.Join(t.TempDir(), "input.bin")
+	content := "hello-termilink-content"
+	if err := os.WriteFile(tmp, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tarPath, err := tarToTemp(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tarPath)
+	if !strings.HasSuffix(tarPath, ".tar") {
+		t.Fatalf("unexpected archive name: %q", tarPath)
+	}
+	tr, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	r := tar.NewReader(tr)
+	hdr, err := r.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hdr.Name != "input.bin" {
+		t.Fatalf("unexpected archive entry: %+v", hdr)
+	}
+	data, _ := io.ReadAll(r)
+	if string(data) != content {
+		t.Fatalf("tar roundtrip mismatch: %q", string(data))
+	}
+}
+
+func TestDeliverFileTooBigNoHost(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "random.bin")
 	payload := make([]byte, 8192)
@@ -186,12 +220,45 @@ func TestSendFileWithZipFallbackTooBig(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewHandler(Options{MaxFileBytes: 256})
-	_, err := h.sendFileWithZipFallback(context.Background(), nil, 1, path, "")
+	_, err := h.deliverFile(context.Background(), nil, 1, 1, path, "")
 	if err == nil {
 		t.Fatal("want limit error, got nil")
 	}
 	if !strings.Contains(err.Error(), "limit") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestDeliverFileEnqueuesLinkApproval(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "random.bin")
+	payload := make([]byte, 8192)
+	if _, err := io.ReadFull(rand.Reader, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := NewHandler(Options{MaxFileBytes: 256, BigFileLink: "uguu.se"})
+	note, err := h.deliverFile(context.Background(), nil, 42, 7, path, "")
+	if err != nil {
+		t.Fatalf("link approval should enqueue, got error: %v", err)
+	}
+	if note != "" {
+		t.Fatalf("unexpected note: %q", note)
+	}
+	p := h.filesPendingFor(42)
+	if p == nil {
+		t.Fatal("expected a pending link approval")
+	}
+	if p.display != "random.bin" || p.host != "uguu.se" || p.userID != 7 {
+		t.Fatalf("unexpected pending file: %+v", p)
+	}
+	if !strings.HasSuffix(p.path, ".tar") {
+		t.Fatalf("link approval must upload a .tar archive, got %q", p.path)
+	}
+	if _, err := os.Stat(p.path); err != nil {
+		t.Fatalf("archive temp must exist while pending: %v", err)
 	}
 }
 

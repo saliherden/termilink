@@ -21,6 +21,7 @@ func TestLoadValid(t *testing.T) {
 	path := writeConfig(t, `
 telegram:
   bot_token: ${TELEGRAM_BOT_TOKEN}
+  big_file_link_host: catbox.moe
 security:
   allowed_users: [1, 2]
 terminal:
@@ -39,6 +40,9 @@ projects:
 	if cfg.Telegram.BotToken != "env-token" {
 		t.Fatalf("token = %q, want env-token", cfg.Telegram.BotToken)
 	}
+	if cfg.Telegram.BigFileLinkHost != "catbox.moe" {
+		t.Fatalf("big_file_link_host = %q, want catbox.moe", cfg.Telegram.BigFileLinkHost)
+	}
 	if len(cfg.Security.AllowedUsers) != 2 {
 		t.Fatalf("allowed_users = %d, want 2", len(cfg.Security.AllowedUsers))
 	}
@@ -47,6 +51,22 @@ projects:
 	}
 	if p := cfg.Projects["api"]; p.Path != "/tmp/api" || p.Commands["dev"] != "npm run dev" {
 		t.Fatalf("project not parsed: %+v", p)
+	}
+}
+
+func TestLoadRejectsBadBigFileLinkHost(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+  big_file_link_host: mega.nasa
+security:
+  allowed_users: [1]
+terminal:
+  shell: /bin/zsh
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("invalid big_file_link_host must be rejected")
 	}
 }
 

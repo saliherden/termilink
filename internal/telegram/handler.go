@@ -46,6 +46,7 @@ type Handler struct {
 	maxMsgLen    int
 	timeout      time.Duration
 	maxFileBytes int64
+	bigFileLink  string
 	log          *slog.Logger
 	audit        *audit.Logger
 
@@ -54,6 +55,9 @@ type Handler struct {
 
 	pendingMu sync.Mutex
 	pending   map[int64]pendingApproval
+
+	filePendingMu sync.Mutex
+	filesPending  map[int64]pendingFile
 }
 
 type Options struct {
@@ -65,8 +69,22 @@ type Options struct {
 	MaxMsgLen    int
 	Timeout      time.Duration
 	MaxFileBytes int64
+	BigFileLink  string
 	Logger       *slog.Logger
 	Audit        *audit.Logger
+}
+
+// pendingFile is a chat-scoped approval request to deliver a file that exceeds
+// Telegram's limit through a temporary anonymous link. path holds the temporary
+// .tar archive that will be uploaded; display is the original file name.
+type pendingFile struct {
+	userID  int64
+	path    string
+	display string
+	size    int64
+	chatID  int64
+	host    string
+	expires time.Time
 }
 
 func NewHandler(opts Options) *Handler {
@@ -79,10 +97,12 @@ func NewHandler(opts Options) *Handler {
 		maxMsgLen:    opts.MaxMsgLen,
 		timeout:      opts.Timeout,
 		maxFileBytes: opts.MaxFileBytes,
+		bigFileLink:  opts.BigFileLink,
 		log:          opts.Logger,
 		audit:        opts.Audit,
 		shells:       map[string]*terminal.Shell{},
 		pending:      map[int64]pendingApproval{},
+		filesPending: map[int64]pendingFile{},
 	}
 	if h.maxMsgLen <= 0 || h.maxMsgLen > msgMaxLength {
 		h.maxMsgLen = defaultMaxMsgLen
@@ -178,6 +198,10 @@ func (h *Handler) handle(ctx context.Context, b *tg.Bot, chatID int64, userID in
 	}
 	if h.pendingApprovalFor(chatID) != nil {
 		h.resolveApproval(ctx, b, chatID, userID, st, text)
+		return
+	}
+	if h.filesPendingFor(chatID) != nil {
+		h.resolveFileApproval(ctx, b, chatID, userID, text)
 		return
 	}
 	h.maybeApproveAndRun(ctx, b, chatID, userID, st, text)
@@ -404,7 +428,7 @@ func (h *Handler) handleGet(ctx context.Context, b *tg.Bot, chatID int64, userID
 			return
 		}
 		h.auditEvent(entryFor(chatID, userID, isOwner, audit.ActionFileGet, target))
-		note, err := h.sendFileWithZipFallback(ctx, b, chatID, path, "⬆️ "+filepath.Base(path))
+		note, err := h.deliverFile(ctx, b, chatID, userID, path, "⬆️ "+filepath.Base(path))
 		if err != nil {
 			h.send(ctx, b, chatID, formatErr(err.Error()))
 			return
@@ -431,7 +455,7 @@ func (h *Handler) handleGet(ctx context.Context, b *tg.Bot, chatID int64, userID
 	}
 	files = filterArtifacts(files, target)
 	if len(files) == 0 {
-		h.send(ctx, b, chatID, formatErr("artifact bulunamadı: "+displayArtifactQuery(target, p.Artifacts)))
+		h.send(ctx, b, chatID, formatErr("no artifacts found for "+displayArtifactQuery(target, p.Artifacts)))
 		return
 	}
 	h.auditEvent(entryFor(chatID, userID, isOwner, audit.ActionFileGet, "artifacts "+st.Project+" "+target))
@@ -442,7 +466,7 @@ func (h *Handler) handleGet(ctx context.Context, b *tg.Bot, chatID int64, userID
 	}
 	for i, f := range files {
 		caption := fmt.Sprintf("%d/%d · 📦 %s (%s)", i+1, total, f.Name, humanSize(f.Size))
-		note, err := h.sendFileWithZipFallback(ctx, b, chatID, f.Path, caption)
+		note, err := h.deliverFile(ctx, b, chatID, userID, f.Path, caption)
 		if err != nil {
 			h.sendPlain(ctx, b, chatID, "⛔ "+f.Name+": "+err.Error())
 			continue
@@ -452,7 +476,7 @@ func (h *Handler) handleGet(ctx context.Context, b *tg.Bot, chatID int64, userID
 		}
 	}
 	if total > maxArtifactsShare {
-		h.sendPlain(ctx, b, chatID, fmt.Sprintf("%d tane bulundu, ilk %d gönderildi", total, maxArtifactsShare))
+		h.sendPlain(ctx, b, chatID, fmt.Sprintf("%d found, first %d sent", total, maxArtifactsShare))
 	}
 }
 
@@ -535,14 +559,14 @@ func (h *Handler) sendFullOutput(ctx context.Context, b *tg.Bot, chatID int64, o
 		data = data[:lim]
 	}
 	preview := terminal.TruncateOutput(out, maxMsgLen)
-	h.sendPlain(ctx, b, chatID, "🔎 Çıktı uzun ("+humanSize(int64(len(out)))+"). Önizleme + tam metin `output.txt` olarak gönderiliyor:")
-	h.send(ctx, b, chatID, formatRun("output.txt (tam çıktı)", terminal.Result{Output: preview, ExitCode: 0}))
+	h.sendPlain(ctx, b, chatID, "🔎 Output is long ("+humanSize(int64(len(out)))+"). Sending a preview + the full text as an `output.txt` document:")
+	h.send(ctx, b, chatID, formatRun("output.txt (full output)", terminal.Result{Output: preview, ExitCode: 0}))
 	_, err := b.SendDocument(ctx, &tg.SendDocumentParams{
 		ChatID:   chatID,
 		Document: &models.InputFileUpload{Filename: "output.txt", Data: bytes.NewReader(data)},
 	})
 	if err != nil {
-		h.sendPlain(ctx, b, chatID, "⚠️ output.txt gönderilemedi: "+err.Error())
+		h.sendPlain(ctx, b, chatID, "⚠️ failed to send output.txt: "+err.Error())
 	}
 }
 
@@ -849,6 +873,9 @@ func (h *Handler) sessionRows() []string {
 }
 
 func (h *Handler) send(ctx context.Context, b *tg.Bot, chatID int64, text string) {
+	if b == nil {
+		return
+	}
 	if len(text) > msgMaxLength {
 		text = string(terminal.TruncateOutput([]byte(text), msgMaxLength))
 	}
@@ -867,5 +894,8 @@ func (h *Handler) send(ctx context.Context, b *tg.Bot, chatID int64, text string
 }
 
 func (h *Handler) sendPlain(ctx context.Context, b *tg.Bot, chatID int64, text string) {
+	if b == nil {
+		return
+	}
 	_, _ = b.SendMessage(ctx, &tg.SendMessageParams{ChatID: chatID, Text: text})
 }

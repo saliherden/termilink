@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"archive/tar"
 	"archive/zip"
 	"context"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	tg "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"github.com/saliherden/termilink/internal/audit"
 	"github.com/saliherden/termilink/internal/session"
 )
 
@@ -227,11 +229,60 @@ func zipToTemp(path string) (string, int64, error) {
 	return tmp.Name(), info.Size(), nil
 }
 
-// sendFileWithZipFallback sends path as a document. Files at or under the
-// upload cap go as-is; larger files are zipped and retried. The returned note
-// describes a zip fallback; a non-nil error means the file could not be
-// delivered (e.g. it exceeds the Telegram limit even zipped).
-func (h *Handler) sendFileWithZipFallback(ctx context.Context, b *tg.Bot, chatID int64, path, caption string) (string, error) {
+// tarToTemp wraps path into an uncompressed .tar archive inside a temporary
+// file and returns its path. Link deliveries use archives so that host
+// file-type restrictions (e.g. .apk on uguu.se) don't block the transfer; a
+// plain tar adds no compression CPU cost and keeps the same size.
+func tarToTemp(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	tmp, err := os.CreateTemp("", "termilink-*.tar")
+	if err != nil {
+		return "", err
+	}
+	tw := tar.NewWriter(tmp)
+	if err := tw.WriteHeader(&tar.Header{
+		Name:    filepath.Base(path),
+		Mode:    0o600,
+		Size:    info.Size(),
+		ModTime: info.ModTime(),
+	}); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", err
+	}
+	if _, err := io.Copy(tw, f); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", err
+	}
+	if err := tw.Close(); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", err
+	}
+	return tmp.Name(), nil
+}
+
+// deliverFile sends path as a document. Files at or under the upload cap go
+// as-is; larger files are zipped and retried. When the archive still exceeds
+// Telegram's document limit the file is queued behind an owner approval that
+// delivers it through a temporary anonymous link (if telegram.big_file_link_host
+// is configured) — otherwise a clear size error is returned. The returned note
+// describes a zip fallback or a pending link approval; a non-nil error means the
+// file could not be delivered.
+func (h *Handler) deliverFile(ctx context.Context, b *tg.Bot, chatID int64, userID int64, path, caption string) (string, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", err
@@ -267,14 +318,145 @@ func (h *Handler) sendFileWithZipFallback(ctx context.Context, b *tg.Bot, chatID
 		return "", fmt.Errorf("zip failed: %w", zerr)
 	}
 	defer os.Remove(zipPath)
-	if zipSize > lim {
+	if zipSize <= lim {
+		if err := send(zipPath, filepath.Base(path)+".zip"); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("zipped %s → %s.zip (%s)", filepath.Base(path), filepath.Base(path), humanSize(zipSize)), nil
+	}
+
+	if h.bigFileLink == "" {
 		return "", fmt.Errorf("%s: %s (%s zipped) exceeds the %s upload limit",
 			filepath.Base(path), humanSize(info.Size()), humanSize(zipSize), humanSize(lim))
 	}
-	if err := send(zipPath, filepath.Base(path)+".zip"); err != nil {
+	tarPath, terr := tarToTemp(path)
+	if terr != nil {
+		return "", fmt.Errorf("archive failed: %w", terr)
+	}
+	// The approval request now owns tarPath: it is removed when the owner
+	// resolves the request (approve, deny, or timeout).
+	if _, err := h.enqueueLinkApproval(ctx, b, chatID, userID, path, tarPath, info.Size()); err != nil {
+		_ = os.Remove(tarPath)
 		return "", err
 	}
-	return fmt.Sprintf("zipped %s → %s.zip (%s)", filepath.Base(path), filepath.Base(path), humanSize(zipSize)), nil
+	return "", nil
+}
+
+// enqueueLinkApproval registers a chat-scoped approval request to deliver a
+// file through a temporary anonymous link and asks the owner for confirmation.
+// The archive (a temporary .tar) is not uploaded until approved; the original
+// path is kept only for display. The caller hands over archive ownership.
+func (h *Handler) enqueueLinkApproval(ctx context.Context, b *tg.Bot, chatID int64, userID int64, original, archive string, size int64) (string, error) {
+	if h.filesPendingFor(chatID) != nil {
+		return "", fmt.Errorf("a link approval is already pending — answer it with *yes* / *no* first, then `get` the file again.")
+	}
+	req := pendingFile{
+		userID:  userID,
+		path:    archive,
+		display: filepath.Base(original),
+		size:    size,
+		chatID:  chatID,
+		host:    h.bigFileLink,
+		expires: time.Now().Add(approvalTTL),
+	}
+	h.filePendingMu.Lock()
+	h.filesPending[chatID] = req
+	h.filePendingMu.Unlock()
+
+	e := entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionApprovalReq, req.display)
+	e.Detail = "link " + h.bigFileLink
+	h.auditEvent(e)
+
+	h.send(ctx, b, chatID, formatBigFileApprovalPrompt(original, size, h.bigFileLink, approvalTTL))
+	return "", nil
+}
+
+// filesPendingFor returns the chat's active link-approval request, if any.
+func (h *Handler) filesPendingFor(chatID int64) *pendingFile {
+	h.filePendingMu.Lock()
+	defer h.filePendingMu.Unlock()
+	req, ok := h.filesPending[chatID]
+	if !ok {
+		return nil
+	}
+	if time.Now().After(req.expires) {
+		delete(h.filesPending, chatID)
+		_ = os.Remove(req.path)
+		return nil
+	}
+	return &req
+}
+
+// resolveFileApproval consumes yes/no answers to a pending link-approval
+// request. Only the owner may approve; approval uploads the file to the link
+// host and posts the public URL.
+func (h *Handler) resolveFileApproval(ctx context.Context, b *tg.Bot, chatID int64, userID int64, text string) {
+	h.filePendingMu.Lock()
+	req, ok := h.filesPending[chatID]
+	if ok {
+		delete(h.filesPending, chatID)
+	}
+	h.filePendingMu.Unlock()
+	if !ok || time.Now().After(req.expires) {
+		raw := ""
+		if ok {
+			raw = req.display
+			_ = os.Remove(req.path)
+		}
+		e := entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionApprovalTimed, raw)
+		e.Detail = "link"
+		h.auditEvent(e)
+		h.sendPlain(ctx, b, chatID, formatLinkApprovalTimeout())
+		return
+	}
+	if !h.authorizer.IsOwner(userID) {
+		h.filePendingMu.Lock()
+		h.filesPending[chatID] = req
+		h.filePendingMu.Unlock()
+		e := entryFor(chatID, userID, false, audit.ActionApprovalBlock, req.display)
+		e.Detail = "link"
+		h.auditEvent(e)
+		h.sendPlain(ctx, b, chatID, "🔒 Only the owner can approve link deliveries.")
+		return
+	}
+	switch approvalVerdict(text) {
+	case answerApprove:
+		e := entryFor(chatID, userID, true, audit.ActionApprovalOK, req.display)
+		e.Detail = "link " + req.host
+		h.auditEvent(e)
+		upCtx, cancel := context.WithTimeout(ctx, linkUploadTimeout)
+		defer cancel()
+		url, err := linkUpload(upCtx, req.host, req.path)
+		_ = os.Remove(req.path)
+		if err != nil {
+			fe := entryFor(chatID, userID, true, audit.ActionFileLink, req.display)
+			fe.OK = audit.Bool(false)
+			fe.Err = err.Error()
+			fe.Detail = "link " + req.host
+			h.auditEvent(fe)
+			h.send(ctx, b, chatID, formatErr("link upload failed: "+err.Error()))
+			return
+		}
+		fe := entryFor(chatID, userID, true, audit.ActionFileLink, req.display)
+		fe.OK = audit.Bool(true)
+		fe.Detail = "link " + req.host
+		h.auditEvent(fe)
+		h.sendPlain(ctx, b, chatID, fmt.Sprintf(
+			"📎 *%s* (%s) → %s\n\n(uploaded as a .tar archive) Retention: %s. The link is public while active.",
+			escapeCode(req.display), humanSize(req.size), url,
+			linkRetentionNote(req.host)))
+	case answerDeny:
+		e := entryFor(chatID, userID, true, audit.ActionApprovalNo, req.display)
+		e.Detail = "link"
+		h.auditEvent(e)
+		_ = os.Remove(req.path)
+		h.sendPlain(ctx, b, chatID, "❌ Rejected — the file was not sent via a link.")
+	default:
+		h.filePendingMu.Lock()
+		h.filesPending[chatID] = req
+		h.filePendingMu.Unlock()
+		h.send(ctx, b, chatID, formatLinkApprovalStillPending())
+	}
 }
 
 // downloadTGFile fetches a Telegram file download URL with a size limit.

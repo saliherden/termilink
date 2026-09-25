@@ -10,6 +10,14 @@ telegram:
   # Default (and Telegram's document limit): 52428800 (50 MB).
   max_file_bytes: 52428800
 
+  # Optional: deliver files too big for Telegram via a temporary anonymous
+  # link instead of failing. Values: "" (disabled), uguu.se (auto-deletes
+  # after ~3 hours, max ~128 MB), catbox.moe (up to 200 MB, persists until
+  # purged). Link transfers require owner approval in chat and are shown in
+  # the audit trail. Only use for non-confidential files — the file is public
+  # while the unguessable link is valid.
+  # big_file_link_host: uguu.se
+
 security:
   # Owner has full access (free cd anywhere). If unset, the first
   # allowed_user becomes the owner. All other allowed_users are workers:
