@@ -38,6 +38,8 @@ const (
 	ActionInput         = "input"
 	ActionStop          = "stop"
 	ActionExit          = "exit"
+	ActionFileGet       = "file_get"
+	ActionFileUpload    = "file_upload"
 )
 
 // Entry is a single append-only audit record, serialized as one JSON line.

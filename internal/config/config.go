@@ -43,6 +43,9 @@ type Config struct {
 
 type TelegramConfig struct {
 	BotToken string `yaml:"bot_token"`
+	// MaxFileBytes caps file transfers (get / auto-upload). Default: 50 MiB,
+	// Telegram's document upload limit.
+	MaxFileBytes int64 `yaml:"max_file_bytes"`
 }
 
 type SecurityConfig struct {
@@ -75,6 +78,9 @@ type ProjectConfig struct {
 
 func Defaults() *Config {
 	return &Config{
+		Telegram: TelegramConfig{
+			MaxFileBytes: 50 << 20,
+		},
 		Terminal: TerminalConfig{
 			Shell:          defaultShell(),
 			CommandTimeout: Duration(30 * time.Minute),
@@ -122,6 +128,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Terminal.Shell == "" {
 		return fmt.Errorf("terminal.shell must not be empty")
+	}
+	if c.Telegram.MaxFileBytes <= 0 {
+		return fmt.Errorf("telegram.max_file_bytes must be a positive number of bytes")
 	}
 	return nil
 }

@@ -25,6 +25,10 @@ dangerous-command approval, workspace policy, single-instance guard) are active.
 - **Dangerous-command approval** — destructive commands are not executed until
   an owner approves them in chat.
 - **Workspace policy** — optionally restrict workers to a set of allowed roots.
+- **Files & artifacts** — `get` delivers build artifacts or single files (with
+  zip fallback for oversized files); sent documents are auto-saved.
+- **Audit logging** — every command, approval, denial and file transfer is
+  written to an append-only JSONL log.
 - **Single instance** — a PID lock prevents running two gateways at once.
 - **Single-source config** — settings in YAML, secrets in `.env` (auto-loaded).
 
@@ -62,9 +66,74 @@ Everything that is **not** a command is executed in the persistent shell.
 | `/exit` | Close the persistent shell |
 | `/sessions` | List active sessions |
 | `/projects` | List configured projects |
+| `get` | Send files/artifacts (also `/get`) |
 | `/ping` | Health check |
 
 A configured project command name (e.g. `build`) runs its shortcut command.
+
+## Files & Artifacts
+
+`get` copies files from the machine into the chat. It has **two modes**; the
+bot decides which one to use from what you type:
+
+| You type… | Mode | What happens |
+| --- | --- | --- |
+| `get` | Artifact | Sends **all** build artifacts of the selected project (newest first) |
+| `get debug` | Artifact | Sends only artifacts whose name/relative path contains `debug` (case-insensitive) |
+| `get ./release/app.apk` | File | Sends **that one file** — also `~/…`, `$HOME/…`, absolute or relative-to-cwd paths |
+
+**Which mode is used?** If the argument looks like a path to an *existing*
+file (`./x`, `~/x`, `…/x`, absolute), it's a File. Anything else (`debug`,
+`release/14`, `.md`) is a search keyword against artifact names. So `get
+release/14` finds `release/14.apk` even though it contains a slash.
+
+`get` also works as `/get` — both spellings are accepted. Note: if a project
+defines a command shortcut named `get`, file fetching wins.
+
+### Artifacts (build outputs)
+
+Define which files count as artifacts per project; they are searched
+recursively and newest-first:
+
+```yaml
+projects:
+  app:
+    path: ~/code/app
+    artifacts: [ "*.apk", "dist/*.zip" ]   # glob vs. file name, or vs. relative path
+```
+
+Globs match against the file name (`*.apk`) or, when they contain a `/`,
+against the path relative to the project (`dist/*.zip`). Artifact mode sends
+at most 15 files per request.
+
+### Uploading (chat → machine)
+
+Just **send a document** in the chat — it is saved into the session's working
+directory automatically. Files are never overwritten: a duplicate gets a `-1`
+suffix (`notes.md` → `notes-1.md`). Workers must select a project first.
+
+### Size limits
+
+```yaml
+telegram:
+  max_file_bytes: 52428800   # upload/download cap, default 50 MB
+```
+
+- **Sending:** a file over the limit is zipped on the fly first. If it still
+  exceeds the limit, a clear error is returned (raw / zipped sizes shown).
+- **Uploading:** a document over the limit is rejected with a clear message.
+
+### Long command output
+
+If a command's output exceeds the Telegram message limit, TermiLink does not
+truncate silently — a **preview** is shown and the **full text arrives as an
+`output.txt` document**.
+
+### Access control
+
+- **Owner** — unrestricted file access and uploads.
+- **Workers** — must select a project first; every file delivery is checked
+  against the workspace policy (`deliver <path>` vet).
 
 ## Security
 

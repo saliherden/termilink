@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -37,15 +38,16 @@ type pendingApproval struct {
 }
 
 type Handler struct {
-	authorizer *security.Authorizer
-	policy     *security.Policy
-	runner     *terminal.Runner
-	sessions   *session.Manager
-	projects   map[string]config.ProjectConfig
-	maxMsgLen  int
-	timeout    time.Duration
-	log        *slog.Logger
-	audit      *audit.Logger
+	authorizer   *security.Authorizer
+	policy       *security.Policy
+	runner       *terminal.Runner
+	sessions     *session.Manager
+	projects     map[string]config.ProjectConfig
+	maxMsgLen    int
+	timeout      time.Duration
+	maxFileBytes int64
+	log          *slog.Logger
+	audit        *audit.Logger
 
 	shellMu sync.Mutex
 	shells  map[string]*terminal.Shell
@@ -55,36 +57,41 @@ type Handler struct {
 }
 
 type Options struct {
-	Authorizer *security.Authorizer
-	Policy     *security.Policy
-	Runner     *terminal.Runner
-	Sessions   *session.Manager
-	Projects   map[string]config.ProjectConfig
-	MaxMsgLen  int
-	Timeout    time.Duration
-	Logger     *slog.Logger
-	Audit      *audit.Logger
+	Authorizer   *security.Authorizer
+	Policy       *security.Policy
+	Runner       *terminal.Runner
+	Sessions     *session.Manager
+	Projects     map[string]config.ProjectConfig
+	MaxMsgLen    int
+	Timeout      time.Duration
+	MaxFileBytes int64
+	Logger       *slog.Logger
+	Audit        *audit.Logger
 }
 
 func NewHandler(opts Options) *Handler {
 	h := &Handler{
-		authorizer: opts.Authorizer,
-		policy:     opts.Policy,
-		runner:     opts.Runner,
-		sessions:   opts.Sessions,
-		projects:   opts.Projects,
-		maxMsgLen:  opts.MaxMsgLen,
-		timeout:    opts.Timeout,
-		log:        opts.Logger,
-		audit:      opts.Audit,
-		shells:     map[string]*terminal.Shell{},
-		pending:    map[int64]pendingApproval{},
+		authorizer:   opts.Authorizer,
+		policy:       opts.Policy,
+		runner:       opts.Runner,
+		sessions:     opts.Sessions,
+		projects:     opts.Projects,
+		maxMsgLen:    opts.MaxMsgLen,
+		timeout:      opts.Timeout,
+		maxFileBytes: opts.MaxFileBytes,
+		log:          opts.Logger,
+		audit:        opts.Audit,
+		shells:       map[string]*terminal.Shell{},
+		pending:      map[int64]pendingApproval{},
 	}
 	if h.maxMsgLen <= 0 || h.maxMsgLen > msgMaxLength {
 		h.maxMsgLen = defaultMaxMsgLen
 	}
 	if h.timeout <= 0 {
 		h.timeout = defaultCmdTimeout
+	}
+	if h.maxFileBytes <= 0 {
+		h.maxFileBytes = defaultMaxFileBytes
 	}
 	if h.sessions == nil {
 		h.sessions = session.NewManager()
@@ -146,6 +153,10 @@ func (h *Handler) Callback() tg.HandlerFunc {
 			h.rejectUnauthorized(msg.From.ID, msg.Chat.ID, msg.Text)
 			return
 		}
+		if msg.Document != nil {
+			h.handleDocument(ctx, b, msg.Chat.ID, msg.From.ID, msg.Document)
+			return
+		}
 		text := strings.TrimSpace(msg.Text)
 		if text == "" {
 			return
@@ -159,6 +170,10 @@ func (h *Handler) handle(ctx context.Context, b *tg.Bot, chatID int64, userID in
 
 	if strings.HasPrefix(text, "/") {
 		h.handleCommand(ctx, b, chatID, userID, st, text)
+		return
+	}
+	if fields := strings.Fields(text); len(fields) > 0 && fields[0] == "get" {
+		h.handleGet(ctx, b, chatID, userID, st, fields[1:])
 		return
 	}
 	if h.pendingApprovalFor(chatID) != nil {
@@ -266,6 +281,8 @@ func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, us
 		h.send(ctx, b, chatID, formatProjects(h.projectNames()))
 	case "project":
 		h.handleProject(ctx, b, chatID, userID, st, args)
+	case "get":
+		h.handleGet(ctx, b, chatID, userID, st, args)
 	case "status":
 		h.send(ctx, b, chatID, h.formatSessionStatus(st))
 	case "sessions":
@@ -366,6 +383,169 @@ func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userI
 	h.sendPlain(ctx, b, chatID, "🗑 Shell closed.")
 }
 
+// handleGet delivers a single file (`get <path>`) or fetches project artifacts:
+// `get` sends every artifact, `get <filter>` only the ones whose name/relative
+// path contains filter (e.g. "debug").
+func (h *Handler) handleGet(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, args []string) {
+	isOwner := h.authorizer.IsOwner(userID)
+	target := strings.Join(args, " ")
+
+	if h.getPathOrFilter(st, target) {
+		path, err := h.resolveTargetPath(st, target)
+		if err != nil {
+			h.send(ctx, b, chatID, formatErr(err.Error()))
+			return
+		}
+		if reason, ok := h.deliveryAuth(st, isOwner, path); !ok {
+			e := entryFor(chatID, userID, isOwner, auditActionForDenial(reason), target)
+			e.Detail = reason
+			h.auditEvent(e)
+			h.send(ctx, b, chatID, formatErr(reason))
+			return
+		}
+		h.auditEvent(entryFor(chatID, userID, isOwner, audit.ActionFileGet, target))
+		note, err := h.sendFileWithZipFallback(ctx, b, chatID, path, "⬆️ "+filepath.Base(path))
+		if err != nil {
+			h.send(ctx, b, chatID, formatErr(err.Error()))
+			return
+		}
+		if note != "" {
+			h.sendPlain(ctx, b, chatID, note)
+		}
+		return
+	}
+
+	p, ok := h.projects[st.Project]
+	if st.Project == "" || !ok {
+		h.send(ctx, b, chatID, formatErr("select a project first with /project <name>, or use `get <path>` for a direct file."))
+		return
+	}
+	if len(p.Artifacts) == 0 {
+		h.send(ctx, b, chatID, formatErr("no artifacts configured for "+st.Project+". Add `artifacts:` globs in config.yaml, or use `get <path>`."))
+		return
+	}
+	files, err := findArtifacts(p.Path, p.Artifacts)
+	if err != nil {
+		h.send(ctx, b, chatID, formatErr("artifact scan failed: "+err.Error()))
+		return
+	}
+	files = filterArtifacts(files, target)
+	if len(files) == 0 {
+		h.send(ctx, b, chatID, formatErr("artifact bulunamadı: "+displayArtifactQuery(target, p.Artifacts)))
+		return
+	}
+	h.auditEvent(entryFor(chatID, userID, isOwner, audit.ActionFileGet, "artifacts "+st.Project+" "+target))
+
+	total := len(files)
+	if total > maxArtifactsShare {
+		files = files[:maxArtifactsShare]
+	}
+	for i, f := range files {
+		caption := fmt.Sprintf("%d/%d · 📦 %s (%s)", i+1, total, f.Name, humanSize(f.Size))
+		note, err := h.sendFileWithZipFallback(ctx, b, chatID, f.Path, caption)
+		if err != nil {
+			h.sendPlain(ctx, b, chatID, "⛔ "+f.Name+": "+err.Error())
+			continue
+		}
+		if note != "" {
+			h.sendPlain(ctx, b, chatID, note)
+		}
+	}
+	if total > maxArtifactsShare {
+		h.sendPlain(ctx, b, chatID, fmt.Sprintf("%d tane bulundu, ilk %d gönderildi", total, maxArtifactsShare))
+	}
+}
+
+func displayArtifactQuery(filter string, patterns []string) string {
+	if filter != "" {
+		return fmt.Sprintf("«%s» (desenler: %s)", filter, strings.Join(patterns, ", "))
+	}
+	return "desenler: " + strings.Join(patterns, ", ")
+}
+
+// deliveryAuth gates file delivery for workers: project selection plus the
+// workspace vet applied to the resolved path. The owner bypasses everything.
+func (h *Handler) deliveryAuth(st *session.State, isOwner bool, path string) (string, bool) {
+	if isOwner {
+		return "", true
+	}
+	if st.Project == "" {
+		return "select a project first with /project <name>.", false
+	}
+	if reason, blocked := h.workspaceVet("deliver " + path); blocked {
+		return reason, false
+	}
+	return "", true
+}
+
+// handleDocument auto-saves any sent document into the session working
+// directory (never overwriting), subject to the upload size cap.
+func (h *Handler) handleDocument(ctx context.Context, b *tg.Bot, chatID int64, userID int64, doc *models.Document) {
+	st := h.sessions.Ensure(strconv.FormatInt(chatID, 10))
+	isOwner := h.authorizer.IsOwner(userID)
+
+	if doc.FileSize > h.uploadLimit() {
+		h.send(ctx, b, chatID, formatErr("file too large: "+humanSize(doc.FileSize)+" > "+humanSize(h.uploadLimit())))
+		return
+	}
+	name := sanitizeUploadFilename(doc.FileName)
+	if name == "" {
+		h.send(ctx, b, chatID, formatErr("invalid file name"))
+		return
+	}
+	if !isOwner && st.Project == "" {
+		h.send(ctx, b, chatID, formatErr("select a project first with /project <name> before uploading."))
+		return
+	}
+
+	downCtx, cancel := context.WithTimeout(ctx, fileDownloadTimeout)
+	defer cancel()
+
+	file, err := b.GetFile(downCtx, &tg.GetFileParams{FileID: doc.FileID})
+	if err != nil {
+		h.send(ctx, b, chatID, formatErr("file metadata fetch failed: "+err.Error()))
+		return
+	}
+	body, err := downloadTGFile(downCtx, b.FileDownloadLink(file), h.uploadLimit())
+	if err != nil {
+		h.send(ctx, b, chatID, formatErr(err.Error()))
+		return
+	}
+
+	dir := h.effectiveCwd(st)
+	path := savedPathNoClobber(dir, name)
+	if path == "" {
+		h.send(ctx, b, chatID, formatErr("could not allocate a unique file name in "+dir))
+		return
+	}
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		h.send(ctx, b, chatID, formatErr("failed to save file: "+err.Error()))
+		return
+	}
+	h.auditEvent(entryFor(chatID, userID, isOwner, audit.ActionFileUpload, name))
+	h.sendPlain(ctx, b, chatID, "💾 saved: `"+escapeCode(path)+"` ("+humanSize(int64(len(body)))+")")
+}
+
+// sendFullOutput delivers the full command output as a document when it is too
+// long for a single message, preceded by a short preview message.
+func (h *Handler) sendFullOutput(ctx context.Context, b *tg.Bot, chatID int64, out []byte, maxMsgLen int) {
+	lim := h.uploadLimit()
+	data := out
+	if int64(len(data)) > lim {
+		data = data[:lim]
+	}
+	preview := terminal.TruncateOutput(out, maxMsgLen)
+	h.sendPlain(ctx, b, chatID, "🔎 Çıktı uzun ("+humanSize(int64(len(out)))+"). Önizleme + tam metin `output.txt` olarak gönderiliyor:")
+	h.send(ctx, b, chatID, formatRun("output.txt (tam çıktı)", terminal.Result{Output: preview, ExitCode: 0}))
+	_, err := b.SendDocument(ctx, &tg.SendDocumentParams{
+		ChatID:   chatID,
+		Document: &models.InputFileUpload{Filename: "output.txt", Data: bytes.NewReader(data)},
+	})
+	if err != nil {
+		h.sendPlain(ctx, b, chatID, "⚠️ output.txt gönderilemedi: "+err.Error())
+	}
+}
+
 func (h *Handler) formatSessionStatus(st *session.State) string {
 	var extra strings.Builder
 	if shell := h.shellFor(st.ID); shell != nil && shell.IsAlive() {
@@ -440,7 +620,8 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 		h.sessions.Save()
 	}
 
-	display := terminal.TruncateOutput(terminal.CleanShellOutput(res), h.maxMsgLen)
+	cleanAll := terminal.CleanShellOutput(res)
+	display := terminal.TruncateOutput(cleanAll, h.maxMsgLen)
 
 	switch {
 	case err == nil:
@@ -459,6 +640,11 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	if isCd {
 		wd := h.effectiveCwd(st)
 		h.send(ctx, b, chatID, "📁 Working directory:\n`"+escapeCode(wd)+"`")
+		return
+	}
+
+	if len(cleanAll) > h.maxMsgLen {
+		h.sendFullOutput(ctx, b, chatID, cleanAll, h.maxMsgLen)
 		return
 	}
 

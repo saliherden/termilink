@@ -6,6 +6,10 @@ telegram:
   # Either put the token here directly or use ${TELEGRAM_BOT_TOKEN}.
   bot_token: ${TELEGRAM_BOT_TOKEN}
 
+  # Maximum file size in bytes for /get and automatic uploads.
+  # Default (and Telegram's document limit): 52428800 (50 MB).
+  max_file_bytes: 52428800
+
 security:
   # Owner has full access (free cd anywhere). If unset, the first
   # allowed_user becomes the owner. All other allowed_users are workers:

@@ -47,14 +47,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 	}
 
 	handler := telegram.NewHandler(telegram.Options{
-		Authorizer: authorizer,
-		Policy:     policy,
-		Runner:     runner,
-		Sessions:   sessions,
-		Projects:   cfg.Projects,
-		Timeout:    cfg.Terminal.CommandTimeout.Std(),
-		Logger:     logger,
-		Audit:      auditLogger,
+		Authorizer:   authorizer,
+		Policy:       policy,
+		Runner:       runner,
+		Sessions:     sessions,
+		Projects:     cfg.Projects,
+		Timeout:      cfg.Terminal.CommandTimeout.Std(),
+		Logger:       logger,
+		Audit:        auditLogger,
+		MaxFileBytes: cfg.Telegram.MaxFileBytes,
 	})
 
 	bot, err := tg.New(cfg.Telegram.BotToken, tg.WithDefaultHandler(handler.Callback()))
