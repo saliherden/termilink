@@ -63,6 +63,9 @@ type SecurityConfig struct {
 	// AuditLog writes a JSONL audit trail of security-sensitive events.
 	// Empty uses the default (~/.termilink/audit.log); "off" disables it.
 	AuditLog string `yaml:"audit_log"`
+	// AuditMaxBytes caps the audit log size in bytes; when exceeded the file
+	// is rotated to "<path>.1" before the next entry. 0 = unlimited.
+	AuditMaxBytes int64 `yaml:"audit_max_bytes"`
 }
 
 type WorkspaceConfig struct {
@@ -79,6 +82,9 @@ type ProjectConfig struct {
 	Path      string            `yaml:"path"`
 	Commands  map[string]string `yaml:"commands"`
 	Artifacts []string          `yaml:"artifacts"`
+	// Env sets additional environment variables (KEY=value) exported into the
+	// project's shell session.
+	Env map[string]string `yaml:"env"`
 }
 
 func Defaults() *Config {
@@ -141,6 +147,19 @@ func (c *Config) Validate() error {
 	case "", "uguu.se", "catbox.moe":
 	default:
 		return fmt.Errorf("telegram.big_file_link_host must be one of uguu.se, catbox.moe (got %q)", c.Telegram.BigFileLinkHost)
+	}
+	if c.Security.AuditMaxBytes < 0 {
+		return fmt.Errorf("security.audit_max_bytes must be >= 0 (0 = unlimited)")
+	}
+	for name, p := range c.Projects {
+		for k, v := range p.Env {
+			if k == "" || strings.ContainsAny(k, "=\n") {
+				return fmt.Errorf("projects.%s.env: invalid key %q", name, k)
+			}
+			if strings.ContainsAny(v, "\n\x00") {
+				return fmt.Errorf("projects.%s.env: value for %q contains a newline", name, k)
+			}
+		}
 	}
 	return nil
 }

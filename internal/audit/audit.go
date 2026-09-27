@@ -77,26 +77,37 @@ func Redact(raw string) string {
 // Logger writes append-only JSON lines to an audit file. Each Logger owns the
 // file descriptor and is safe for concurrent use.
 type Logger struct {
-	mu     sync.Mutex
-	path   string
-	f      *os.File
-	warned bool
+	mu       sync.Mutex
+	path     string
+	f        *os.File
+	maxBytes int64 // 0 = unlimited; when exceeded the file is rotated to .1
+	warned   bool
 }
 
 // Open opens (creating if needed) the audit log at path. Pass "" to use the
 // default location. Use a nil *Logger to disable auditing.
 func Open(path string) (*Logger, error) {
+	return OpenWithMax(path, 0)
+}
+
+// OpenWithMax is like Open but rotates the log to "<path>.1" before appending
+// once the file grows past maxBytes (0 disables rotation). Rotation keeps a
+// single backup and never blocks the caller.
+func OpenWithMax(path string, maxBytes int64) (*Logger, error) {
 	if path == "" {
 		path = DefaultPath()
 	}
 	if path == "" {
 		return nil, errors.New("audit: no default path available")
 	}
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %s: %w", path, err)
 	}
-	return &Logger{path: path, f: f}, nil
+	return &Logger{path: path, f: f, maxBytes: maxBytes}, nil
 }
 
 // Path returns the resolved audit file location.
@@ -118,6 +129,7 @@ func (l *Logger) Audit(e Entry) {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	l.maybeRotate()
 	data, err := json.Marshal(e)
 	if err != nil {
 		l.note("marshal: " + err.Error())
@@ -129,6 +141,35 @@ func (l *Logger) Audit(e Entry) {
 	if _, err := l.f.Write(buf); err != nil {
 		l.note("write: " + err.Error())
 	}
+}
+
+// maybeRotate moves the current file to "<path>.1" and starts a fresh one when
+// it has grown past maxBytes. Called with l.mu held.
+func (l *Logger) maybeRotate() {
+	if l.maxBytes <= 0 {
+		return
+	}
+	info, err := l.f.Stat()
+	if err != nil {
+		l.note("stat: " + err.Error())
+		return
+	}
+	if info.Size() <= l.maxBytes {
+		return
+	}
+	if err := l.f.Close(); err != nil {
+		l.note("close before rotate: " + err.Error())
+		return
+	}
+	if err := os.Rename(l.path, l.path+".1"); err != nil {
+		l.note("rotate rename: " + err.Error())
+	}
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		l.note("rotate reopen: " + err.Error())
+		return
+	}
+	l.f = f
 }
 
 func (l *Logger) note(msg string) {

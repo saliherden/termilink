@@ -108,6 +108,20 @@ Globs match against the file name (`*.apk`) or, when they contain a `/`,
 against the path relative to the project (`dist/*.zip`). Artifact mode sends
 at most 15 files per request.
 
+With a project selected, `TERMILINK_PROJECT=<name>` is already exported into
+the shell. Add more per-project variables with `env:` — they are exported when
+the shell session is (re)created (first command, `/project` switch, or
+`/exit`):
+
+```yaml
+projects:
+  app:
+    path: ~/code/app
+    env:
+      APP_PORT: "8080"
+      NODE_ENV: production
+```
+
 ### Uploading (chat → machine)
 
 Just **send a document** in the chat — it is saved into the session's working
@@ -224,7 +238,8 @@ shell expansions are trusted to the user, and the owner is fully trusted.
 
 ```yaml
 security:
-  audit_log: ""   # empty = ~/.termilink/audit.log, "off" disables, or a path
+  audit_log: ""       # empty = ~/.termilink/audit.log, "off" disables, or a path
+  audit_max_bytes: 0  # rotate to audit.log.1 once exceeded (0 = unlimited)
 ```
 
 Every security-sensitive event is appended to the audit file as one JSON line
@@ -244,7 +259,42 @@ termilink audit --json   # raw JSON lines, e.g. for machine processing
 ```
 
 Auditing never takes the agent down — write errors are reported once to stderr
-and ignored. `security.audit_log: off` disables it entirely.
+and ignored. `security.audit_log: off` disables it entirely. To keep the log
+from growing forever, set `audit_max_bytes` (default `0` = unlimited); once the
+file exceeds it, the current log is rotated to `audit.log.1` before the next
+entry.
+
+## Run as a service
+
+### macOS (launchd)
+
+A template is provided at `scripts/com.termilink.agent.plist`. Fill in the
+binary path and the directory containing `config.yaml`, then install:
+
+```bash
+sed "s|/PATH/TO/termilink|/Users/you/bin/termilink|; s|/PATH/TO/DIR/WITH/config.yaml|/Users/you/termilink|" \
+    scripts/com.termilink.agent.plist > ~/Library/LaunchAgents/com.termilink.agent.plist
+launchctl load ~/Library/LaunchAgents/com.termilink.agent.plist
+```
+
+Replace the placeholders (`/PATH/TO/termilink` binary, `/PATH/TO/DIR/WITH/config.yaml`
+directory — also fix the `StandardOutPath`/`StandardErrorPath` if you like).
+Control it with:
+
+```bash
+launchctl unload ~/Library/LaunchAgents/com.termilink.agent.plist   # stop
+launchctl print gui/$(id -u)/com.termilink.agent                    # status
+```
+
+`RunAtLoad` starts the agent on login; `KeepAlive.SuccessfulExit = false`
+restarts it if it crashes. While it runs under launchd, **don't** also run
+`termilink start` manually — the single-instance PID guard will refuse the second
+one.
+
+### Other platforms
+
+A systemd unit (Linux) or Windows Service wrapper can be added the same way;
+only the macOS template ships today.
 
 ## CLI
 

@@ -83,6 +83,75 @@ security:
 	}
 }
 
+func TestLoadProjectEnv(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+terminal:
+  shell: /bin/zsh
+projects:
+  api:
+    path: /tmp/api
+    env:
+      API_PORT: "8080"
+      FOO: bar
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := cfg.Projects["api"].Env
+	if env["API_PORT"] != "8080" || env["FOO"] != "bar" {
+		t.Fatalf("project env not parsed: %+v", env)
+	}
+}
+
+func TestLoadRejectsBadProjectEnv(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	cases := []struct{ name, env string }{
+		{"bad key", "      \"A=B\": x"},
+		{"bad key newline", "      \"A\\nB\": x"},
+		{"newline value", "      A: \"x\\ny\""},
+	}
+	for _, c := range cases {
+		path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+terminal:
+  shell: /bin/zsh
+projects:
+  api:
+    path: /tmp/api
+    env:
+`+c.env+`
+`)
+		if _, err := Load(path); err == nil {
+			t.Fatalf("%s: expected error, got none", c.name)
+		}
+	}
+}
+
+func TestLoadRejectsBadAuditMaxBytes(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+  audit_max_bytes: -5
+terminal:
+  shell: /bin/zsh
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("negative audit_max_bytes must be rejected")
+	}
+}
+
 func TestLoadRejectsMissingToken(t *testing.T) {
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	path := writeConfig(t, `

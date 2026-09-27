@@ -42,6 +42,10 @@ security:
   # ~/.termilink/audit.log; "off" disables it.
   # audit_log: /absolute/path/to/audit.log
 
+  # Optional: cap the audit log size in bytes; the current file is rotated to
+  # "<path>.1" before the next entry once it grows past this. 0 = unlimited.
+  # audit_max_bytes: 26214400   # 25 MiB
+
 workspace:
   # Optional: restrict filesystem access to these roots.
   allowed:
@@ -60,6 +64,8 @@ projects:
   #       build: npm run build
   #     artifacts:
   #       - dist
+  #     env:
+  #       API_PORT: "8080"
   #
   #   mobile:
   #     path: /Users/user/projects/mobile-example

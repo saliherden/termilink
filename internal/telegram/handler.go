@@ -768,6 +768,11 @@ func (h *Handler) getShell(st *session.State) (*terminal.Shell, error) {
 	var env []string
 	if st.Project != "" {
 		env = append(env, "TERMILINK_PROJECT="+st.Project)
+		if p, ok := h.projects[st.Project]; ok {
+			for k, v := range p.Env {
+				env = append(env, k+"="+v)
+			}
+		}
 	}
 	if h.runner == nil {
 		return nil, errors.New("no terminal runner configured")

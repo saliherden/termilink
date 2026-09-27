@@ -103,5 +103,5 @@ func newAuditLogger(cfg *config.Config) (*audit.Logger, error) {
 	if cfg.Security.AuditLog == "off" {
 		return nil, nil
 	}
-	return audit.Open(cfg.Security.AuditLog)
+	return audit.OpenWithMax(cfg.Security.AuditLog, cfg.Security.AuditMaxBytes)
 }
