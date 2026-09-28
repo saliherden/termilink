@@ -159,31 +159,12 @@ func TestOpenShellTurnsEchoOff(t *testing.T) {
 				}
 				time.Sleep(10 * time.Millisecond)
 			}
-			if n := countOccurrences(string(s.Output()), probe); n != 1 {
+			if n := countOccurrences(s.Output(), probe); n != 1 {
 				t.Fatalf("attempt %d: probe appears %d times, want 1 (echo is on)\n%s",
-					i, n, describeTerminalState(s))
+					i, n, s.diagnostics())
 			}
 		}()
 	}
-}
-
-// describeTerminalState renders what the shell thinks its terminal is doing,
-// for the failure message. The terminal mode is read by typing a command
-// directly rather than through ExecCommand, which is the thing under suspicion.
-func describeTerminalState(s *Shell) string {
-	_ = s.Write([]byte("stty -a; echo done-$?; zsh -c 'echo ZSH=$ZSH_VERSION'\n"))
-	time.Sleep(500 * time.Millisecond)
-	return fmt.Sprintf("buffer: %q", string(s.Output()))
-}
-
-func countOccurrences(hay, needle string) int {
-	c := 0
-	for i := 0; i+len(needle) <= len(hay); i++ {
-		if hay[i:i+len(needle)] == needle {
-			c++
-		}
-	}
-	return c
 }
 
 // TestLastIndexOf pins the helper the frame slicing depends on, including the

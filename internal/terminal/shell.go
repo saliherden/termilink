@@ -23,6 +23,9 @@ const (
 	shellSentinel     = "TLMP> "
 	shellOpenTimeout  = 8 * time.Second
 	shellEOLWait      = 2 * time.Second
+	// setupAttempts bounds how many times the shell is configured before
+	// giving up on getting the echo off.
+	setupAttempts = 3
 )
 
 var shellSeq uint64
@@ -92,28 +95,14 @@ type Shell struct {
 	stopped atomic.Bool
 }
 
-// prepareZDotDir creates a throwaway ZDOTDIR whose .zshrc configures the
-// shell for framed command capture: echo off, no line editor, and a sentinel
-// prompt. The marker argument makes the shell report readiness on startup.
-//
-// This runs from .zshrc rather than from a line typed into the terminal
-// because zsh sources it before it ever starts the line editor. Typed in, the
-// setup would be echoed back by the PTY and the terminal state would depend on
-// zsh's timing for turning the editor off after the line has been read —
-// which is exactly what left echo enabled on some platforms.
-func prepareZDotDir(marker string) (string, error) {
+// prepareZDotDir creates a throwaway ZDOTDIR with an empty .zshrc so the
+// user's own shell configuration cannot interfere with command capture.
+func prepareZDotDir() (string, error) {
 	zdir, err := os.MkdirTemp("", "termilink-zdot-*")
 	if err != nil {
 		return "", err
 	}
-	zshrc := "stty -echo 2>/dev/null\n" +
-		"unsetopt zle\n" +
-		"unsetopt flowcontrol\n" +
-		"setopt no_beep\n" +
-		"PROMPT='" + shellSentinel + "'\n" +
-		"RPROMPT=''\n" +
-		"echo REQ_" + marker + "\n"
-	if err := os.WriteFile(filepath.Join(zdir, ".zshrc"), []byte(zshrc), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(zdir, ".zshrc"), nil, 0o600); err != nil {
 		_ = os.RemoveAll(zdir)
 		return "", err
 	}
@@ -132,8 +121,7 @@ func (r *Runner) OpenShell(dir string, env []string) (*Shell, error) {
 	if r.shell == "" {
 		return nil, fmt.Errorf("terminal: no shell configured")
 	}
-	marker := nextShellMarker()
-	zdir, err := prepareZDotDir(marker)
+	zdir, err := prepareZDotDir()
 	if err != nil {
 		return nil, fmt.Errorf("prepare zdotdir: %w", err)
 	}
@@ -180,30 +168,57 @@ func (r *Runner) OpenShell(dir string, env []string) (*Shell, error) {
 		s.markDone()
 	}()
 
-	if err := s.waitReady(marker); err != nil {
+	if err := s.startShell(); err != nil {
 		s.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-// waitReady blocks until the shell has run its setup and reported back.
+// startShell configures the shell for framed command capture and confirms the
+// configuration actually took effect.
 //
-// The setup itself is not typed into the PTY — prepareZDotDir puts it in the
-// throwaway .zshrc instead. Sending it as a line was the bug this replaced: a
-// line written to the PTY comes back echoed, and the echo carried the very
-// markers the rest of the code reads. Echo has to be off before any command
-// frame is sent, otherwise ExecCommand matches the markers in the echo and
-// reports a command finished before it has run, handing the caller its own
-// command line as the output. Where the echo text sits in the buffer is
-// decided by the terminal and by zsh's line editor, so it cannot be worked
-// around by rearranging the line; the only reliable answer is to never write
-// the setup through the PTY at all.
-func (s *Shell) waitReady(marker string) error {
+// The confirmation is the point. Sending the setup line and assuming it worked
+// is what caused the bug this guards: the terminal may keep echoing after the
+// line has run, and the PTY's echo carries the very markers ExecCommand reads,
+// so every command gets reported finished before it has run and its caller is
+// handed its own command line as the output. Whether the echo has stopped
+// depends on the terminal and on the shell's line editor, so it is measured
+// here rather than inferred — and if it cannot be stopped, startup fails
+// loudly instead of returning results that are quietly wrong.
+func (s *Shell) startShell() error {
 	deadline := time.Now().Add(shellOpenTimeout)
+	for attempt := 1; attempt <= setupAttempts; attempt++ {
+		marker := nextShellMarker()
+		// The marker is parked in a shell variable instead of being pasted
+		// into the echo argument, so the literal text "REQ_<marker>" never
+		// appears in the line being sent. Otherwise the PTY's echo of this
+		// very line would satisfy waitReady on its own.
+		setup := "stty -echo; unsetopt zle; unsetopt flowcontrol; setopt no_beep; PROMPT='" +
+			shellSentinel + "'; RPROMPT=''; m='" + marker + "'; echo REQ_$m\n"
+		if err := s.writeString(setup); err != nil {
+			return err
+		}
+		if err := s.waitReady(marker, deadline); err != nil {
+			return err
+		}
+		echoed, err := s.echoIsOn()
+		if err != nil {
+			return err
+		}
+		if !echoed {
+			return nil
+		}
+		s.buf.Reset()
+	}
+	return fmt.Errorf("terminal still echoing after %d attempts to configure it%s", setupAttempts, s.diagnostics())
+}
+
+// waitReady blocks until the shell reports the marker from the setup line.
+func (s *Shell) waitReady(marker string, deadline time.Time) error {
 	for time.Now().Before(deadline) {
 		if !s.IsAlive() {
-			return fmt.Errorf("shell exited during startup")
+			return fmt.Errorf("shell exited during startup%s", s.diagnostics())
 		}
 		if bytesContains(s.Output(), []byte("REQ_"+marker)) {
 			s.buf.Reset()
@@ -211,7 +226,51 @@ func (s *Shell) waitReady(marker string) error {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return fmt.Errorf("shell did not become ready within %s", shellOpenTimeout)
+	return fmt.Errorf("shell did not become ready within %s%s", shellOpenTimeout, s.diagnostics())
+}
+
+// echoIsOn measures whether the terminal echoes what we write. A probe that
+// comes back once was only run by the shell; coming back twice means the echo
+// is on as well. The wait is for the prompt that follows the probe, not for
+// the probe's first appearance, because the echo arrives first.
+func (s *Shell) echoIsOn() (bool, error) {
+	probe := "tlprobe" + nextShellMarker()
+	if err := s.writeString("echo " + probe + "\n"); err != nil {
+		return false, err
+	}
+	deadline := time.Now().Add(shellEOLWait)
+	for time.Now().Before(deadline) {
+		if !s.IsAlive() {
+			return false, fmt.Errorf("shell exited while probing for echo%s", s.diagnostics())
+		}
+		out := s.Output()
+		at := lastIndexOf(out, []byte(probe))
+		if at >= 0 && lastIndexOf(out, []byte(shellSentinel)) > at {
+			s.buf.Reset()
+			return countOccurrences(out, probe) > 1, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false, fmt.Errorf("shell did not run a probe within %s%s", shellEOLWait, s.diagnostics())
+}
+
+// diagnostics renders what the shell thinks its terminal is doing, for error
+// messages. It asks the shell directly rather than going through
+// ExecCommand, which is the thing under suspicion.
+func (s *Shell) diagnostics() string {
+	_ = s.writeString("stty -a; echo stty_status=$?; echo ZSH=$ZSH_VERSION\n")
+	time.Sleep(300 * time.Millisecond)
+	return fmt.Sprintf("\nbuffer: %q", string(s.Output()))
+}
+
+func countOccurrences(hay []byte, needle string) int {
+	c := 0
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		if string(hay[i:i+len(needle)]) == needle {
+			c++
+		}
+	}
+	return c
 }
 
 func (s *Shell) pump() {
