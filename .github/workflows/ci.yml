@@ -28,7 +28,16 @@ jobs:
         # Windows is absent on purpose. creack/pty compiles there, but
         # StartWithSize returns ErrUnsupported at runtime, so every PTY test
         # would fail on a runner that could never be made to pass.
-        os: [ubuntu-latest, macos-latest]
+        #
+        # The Linux label is pinned rather than ubuntu-latest. These tests
+        # drive a real zsh over a PTY and read the terminal's line settings, so
+        # they are sensitive to what the runner image happens to ship — enough
+        # that they broke on an image the local machine could not reproduce.
+        # ubuntu-latest moves from 24.04 to 26.04 between 19 Oct and 19 Nov
+        # 2026 with nothing in this repo changing. Pinned, moving forward is a
+        # deliberate edit and a visible test failure, not a surprise on a
+        # Tuesday.
+        os: [ubuntu-24.04, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
