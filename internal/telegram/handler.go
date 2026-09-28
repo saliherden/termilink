@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,7 @@ type Handler struct {
 	timeout      time.Duration
 	maxFileBytes int64
 	bigFileLink  string
+	agentCfg     config.AgentConfig
 	log          *slog.Logger
 	audit        *audit.Logger
 
@@ -58,6 +60,9 @@ type Handler struct {
 
 	filePendingMu sync.Mutex
 	filesPending  map[int64]pendingFile
+
+	agentMu sync.Mutex
+	agents  map[int64]*agentRun
 }
 
 type Options struct {
@@ -70,6 +75,7 @@ type Options struct {
 	Timeout      time.Duration
 	MaxFileBytes int64
 	BigFileLink  string
+	Agent        config.AgentConfig
 	Logger       *slog.Logger
 	Audit        *audit.Logger
 }
@@ -100,9 +106,11 @@ func NewHandler(opts Options) *Handler {
 		bigFileLink:  opts.BigFileLink,
 		log:          opts.Logger,
 		audit:        opts.Audit,
+		agentCfg:     opts.Agent,
 		shells:       map[string]*terminal.Shell{},
 		pending:      map[int64]pendingApproval{},
 		filesPending: map[int64]pendingFile{},
+		agents:       map[int64]*agentRun{},
 	}
 	if h.maxMsgLen <= 0 || h.maxMsgLen > msgMaxLength {
 		h.maxMsgLen = defaultMaxMsgLen
@@ -165,9 +173,20 @@ func (h *Handler) rejectUnauthorized(userID, chatID int64, text string) {
 
 func (h *Handler) Callback() tg.HandlerFunc {
 	return func(ctx context.Context, b *tg.Bot, update *models.Update) {
+		// The bot library dispatches each update on its own goroutine, so a panic
+		// anywhere below takes the whole gateway down and every later command goes
+		// unanswered. Contain it here — and register it before touching any field
+		// of the update, so even a malformed one that panics while being read is
+		// still contained.
+		var chatID, userID int64
+		defer h.recoverUpdate(ctx, b, &chatID, &userID)()
+
+		// A message without a sender carries nothing to act on. models.Chat is a
+		// value, not a pointer, so it is always safe to read.
 		if update.Message == nil || update.Message.From == nil {
 			return
 		}
+		chatID, userID = update.Message.Chat.ID, update.Message.From.ID
 		msg := update.Message
 		if !h.authorizer.IsAllowed(msg.From.ID) {
 			h.rejectUnauthorized(msg.From.ID, msg.Chat.ID, msg.Text)
@@ -185,6 +204,26 @@ func (h *Handler) Callback() tg.HandlerFunc {
 	}
 }
 
+// recoverUpdate returns a deferred function that turns a panic in update
+// handling into a recorded, non-fatal event. Without it a single fault stops the
+// whole gateway: the Telegram library runs each update on its own goroutine and
+// nothing else would recover, so the bot would simply stop answering while
+// looking alive. chatID and userID are pointers because they are filled in as
+// soon as the update is known to be well formed, and the panic may happen later.
+func (h *Handler) recoverUpdate(ctx context.Context, b *tg.Bot, chatID, userID *int64) func() {
+	return func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		h.log.Error("panic handling update", "panic", r, "stack", string(debug.Stack()))
+		h.auditEvent(entryFor(*chatID, *userID, false, audit.ActionPanic, fmt.Sprint(r)))
+		if *chatID != 0 {
+			h.send(ctx, b, *chatID, "⚠️ That command hit an error. The bot is still running — the details are in the log.")
+		}
+	}
+}
+
 func (h *Handler) handle(ctx context.Context, b *tg.Bot, chatID int64, userID int64, text string) {
 	st := h.sessions.Ensure(strconv.FormatInt(chatID, 10))
 
@@ -194,6 +233,16 @@ func (h *Handler) handle(ctx context.Context, b *tg.Bot, chatID int64, userID in
 	}
 	if fields := strings.Fields(text); len(fields) > 0 && fields[0] == "get" {
 		h.handleGet(ctx, b, chatID, userID, st, fields[1:])
+		return
+	}
+	if run := h.agentSessionFor(chatID); run != nil {
+		intake := strings.TrimSpace(strings.TrimPrefix(text, "agent"))
+		h.handleAgentMessage(ctx, b, chatID, userID, run, intake)
+		return
+	}
+	if fields := strings.Fields(text); len(fields) > 0 && fields[0] == "agent" {
+		prompt := strings.TrimSpace(strings.TrimPrefix(text, "agent"))
+		h.handleAgentStart(ctx, b, chatID, userID, st, prompt)
 		return
 	}
 	if h.pendingApprovalFor(chatID) != nil {
@@ -317,7 +366,20 @@ func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, us
 		h.handleStop(ctx, b, chatID, userID, st)
 	case "exit":
 		h.handleExit(ctx, b, chatID, userID, st)
+	case "agent":
+		h.handleAgentCommand(ctx, b, chatID, userID, st, args)
 	default:
+		// A leading slash alone does not make something a command. Known
+		// commands above always win, but anything the bot does not recognize
+		// is far more likely text the user wants typed into the agent — a path
+		// like /update.sh, a flag, a typo — and answering "Unknown command"
+		// both swallows what they wrote and hides it. With an agent running we
+		// pass the message through untouched; MapInput still turns /up, /esc
+		// and friends into real key bytes. Without one, nothing changes.
+		if run := h.agentSessionFor(chatID); run != nil {
+			h.handleAgentMessage(ctx, b, chatID, userID, run, text)
+			return
+		}
 		h.send(ctx, b, chatID, unknown)
 	}
 }
@@ -399,12 +461,51 @@ func (h *Handler) handleStop(ctx context.Context, b *tg.Bot, chatID int64, userI
 	_ = shell.Stop()
 }
 
+// handleExit is the "close everything" command. With an agent running it must
+// also tear the agent down, because the agent holds its own PTY that /exit
+// cannot reach on its own.
 func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State) {
+	// Agent first. Its session holds work the owner would lose silently, and its
+	// final screen has to be captured while the TUI is still alive; closing the
+	// shell first interrupts the machine underneath it and the last screen comes
+	// out blank.
+	if run := h.agentSessionFor(chatID); run != nil {
+		isOwner := h.authorizer.IsOwner(userID)
+		h.auditEvent(entryFor(chatID, userID, isOwner, audit.ActionAgentStop, "exit via /exit"))
+		// Claim before announcing: whoever claims owns the single announcement,
+		// so an agent that dies at the same moment is still reported exactly once.
+		if h.agentCleanup(chatID, run) {
+			// Screen before close, same reason as /agent stop: Close interrupts the
+			// TUI, which redraws and then clears, so a screen taken after it shows
+			// the shutdown instead of the session.
+			screen := captureAgentExitScreen(run)
+			_ = run.sess.Close()
+			h.announceAgentExit(run, screen)
+		}
+	}
 	h.closeShellFor(st.ID)
 	st.Active = false
+	// /exit is a context reset, not just a process kill. closeShellFor only drops
+	// the PTY from h.shells; the *State survives it, so without this block the
+	// very next plain message calls getShell and reopens a shell in the same
+	// directory under the same project — the command would look like it had done
+	// nothing. Killing processes is already covered by /stop (a running command)
+	// and /agent stop (the agent), which is what leaves "reset my context" as the
+	// one thing only /exit can mean.
+	//
+	// Cwd is set explicitly rather than cleared: effectiveCwd falls back to the
+	// gateway process's own working directory, which is wherever the bot happened
+	// to be started, not a predictable "home".
+	if home, err := os.UserHomeDir(); err == nil {
+		st.Cwd = home
+	} else {
+		st.Cwd = "$HOME"
+	}
+	st.Project = ""
+	st.LastCmd = ""
 	h.sessions.Save()
-	h.auditEvent(entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionExit, ""))
-	h.sendPlain(ctx, b, chatID, "🗑 Shell closed.")
+	h.auditEvent(entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionExit, "/exit"))
+	h.sendPlain(ctx, b, chatID, "🗑 Shell closed. Project and working directory cleared — the next command starts fresh in your home directory.")
 }
 
 // handleGet delivers a single file (`get <path>`) or fetches project artifacts:
@@ -572,6 +673,20 @@ func (h *Handler) sendFullOutput(ctx context.Context, b *tg.Bot, chatID int64, o
 
 func (h *Handler) formatSessionStatus(st *session.State) string {
 	var extra strings.Builder
+	if id, err := strconv.ParseInt(st.ID, 10, 64); err == nil {
+		if run := h.agentSessionFor(id); run != nil && run.sess.IsAlive() {
+			fmt.Fprintf(&extra, "\n\nAgent:\n`pid %d, %s, up %s`", run.sess.PID(),
+				escapeCode(run.project), time.Since(run.sess.StartTime()).Round(time.Second))
+		} else if h.agentCfg.Enabled {
+			// Stated explicitly, the way the Shell block below does it. Printing
+			// nothing left the reader unable to tell "no agent running" apart from
+			// "this build has no agent support" — and the audit log had just
+			// recorded /exit closing one, which is a natural moment to go looking.
+			// Gated on Enabled so a gateway with the feature off never suggests a
+			// command that cannot work.
+			extra.WriteString("\n\nAgent: _(none)_. Send `agent <prompt>` to start one.")
+		}
+	}
 	if shell := h.shellFor(st.ID); shell != nil && shell.IsAlive() {
 		fmt.Fprintf(&extra, "\n\nShell:\n`pid %d, up %s`", shell.PID(), shell.Age().Round(time.Second))
 		tail := shell.Tail(2048)
@@ -765,15 +880,7 @@ func (h *Handler) getShell(st *session.State) (*terminal.Shell, error) {
 		}
 		delete(h.shells, st.ID)
 	}
-	var env []string
-	if st.Project != "" {
-		env = append(env, "TERMILINK_PROJECT="+st.Project)
-		if p, ok := h.projects[st.Project]; ok {
-			for k, v := range p.Env {
-				env = append(env, k+"="+v)
-			}
-		}
-	}
+	env := h.projectEnv(st)
 	if h.runner == nil {
 		return nil, errors.New("no terminal runner configured")
 	}
@@ -783,6 +890,23 @@ func (h *Handler) getShell(st *session.State) (*terminal.Shell, error) {
 	}
 	h.shells[st.ID] = s
 	return s, nil
+}
+
+// projectEnv builds the per-session environment additions for a project session:
+// TERMILINK_PROJECT plus the project's env block. The base environment is not
+// repeated here — the terminal runner prepends os.Environ() to whatever this
+// returns.
+func (h *Handler) projectEnv(st *session.State) []string {
+	env := []string{}
+	if st.Project != "" {
+		env = append(env, "TERMILINK_PROJECT="+st.Project)
+		if p, ok := h.projects[st.Project]; ok {
+			for k, v := range p.Env {
+				env = append(env, k+"="+v)
+			}
+		}
+	}
+	return env
 }
 
 func (h *Handler) shellFor(id string) *terminal.Shell {
@@ -808,6 +932,14 @@ func (h *Handler) Close() {
 	h.shellMu.Unlock()
 	for _, s := range shells {
 		_ = s.Close()
+	}
+
+	h.agentMu.Lock()
+	agents := h.agents
+	h.agents = map[int64]*agentRun{}
+	h.agentMu.Unlock()
+	for _, r := range agents {
+		_ = r.sess.Close()
 	}
 }
 

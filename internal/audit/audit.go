@@ -41,6 +41,13 @@ const (
 	ActionFileGet       = "file_get"
 	ActionFileUpload    = "file_upload"
 	ActionFileLink      = "file_link"
+	ActionAgentStart    = "agent_start"
+	ActionAgentInput    = "agent_input"
+	ActionAgentStop     = "agent_stop"
+	ActionAgentHistory  = "agent_history"
+	ActionAgentSession  = "agent_session"
+	ActionAgentError    = "agent_error"
+	ActionPanic         = "panic"
 )
 
 // Entry is a single append-only audit record, serialized as one JSON line.

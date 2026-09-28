@@ -35,6 +35,7 @@ type Config struct {
 	Security  SecurityConfig           `yaml:"security"`
 	Workspace WorkspaceConfig          `yaml:"workspace"`
 	Terminal  TerminalConfig           `yaml:"terminal"`
+	Agent     AgentConfig              `yaml:"agent"`
 	Projects  map[string]ProjectConfig `yaml:"projects"`
 
 	// Path of the loaded configuration file. Not serialized.
@@ -78,6 +79,32 @@ type TerminalConfig struct {
 	MaxOutputBytes int      `yaml:"max_output_bytes"`
 }
 
+// AgentConfig controls the interactive agent (TUI bridge) feature. The agent
+// CLI (e.g. opencode) is started in a project directory inside a PTY and its
+// screen is relayed to Telegram; only the owner can control it.
+type AgentConfig struct {
+	// Enabled gates the whole feature (default true).
+	Enabled bool `yaml:"enabled"`
+	// Command selects the CLI agent binary: "" auto-detects (opencode, claude,
+	// codex, gemini via PATH), or set a bare name or an absolute path.
+	Command string `yaml:"command"`
+	// Screen controls how the agent screen is relayed (default png).
+	Screen AgentScreenConfig `yaml:"screen"`
+}
+
+// AgentScreenConfig configures the TUI screen relay.
+type AgentScreenConfig struct {
+	// Mode selects the relay format: "png" sends the screen as a colored image,
+	// "text" sends it as a code block.
+	//
+	// In png mode the live screen is uploaded as a photo. The screen posted when
+	// a session ends is always text, whatever this says: it is written output
+	// rather than a picture of one, so it stays copyable and searchable. This
+	// field governs the live screen only. "text" drops the images altogether, at
+	// the cost of colors and layout.
+	Mode string `yaml:"mode"`
+}
+
 type ProjectConfig struct {
 	Path      string            `yaml:"path"`
 	Commands  map[string]string `yaml:"commands"`
@@ -96,6 +123,10 @@ func Defaults() *Config {
 			Shell:          defaultShell(),
 			CommandTimeout: Duration(30 * time.Minute),
 			MaxOutputBytes: 1 << 20, // 1 MiB
+		},
+		Agent: AgentConfig{
+			Enabled: true,
+			Screen:  AgentScreenConfig{Mode: "png"},
 		},
 		Projects: map[string]ProjectConfig{},
 	}
@@ -136,6 +167,11 @@ func (c *Config) Validate() error {
 	case "", "all", "worker", "off":
 	default:
 		return fmt.Errorf("security.approve_dangerous must be one of all, worker, off (got %q)", c.Security.ApproveDangerous)
+	}
+	switch c.Agent.Screen.Mode {
+	case "", "png", "text":
+	default:
+		return fmt.Errorf("agent.screen.mode must be one of png, text (got %q)", c.Agent.Screen.Mode)
 	}
 	if c.Terminal.Shell == "" {
 		return fmt.Errorf("terminal.shell must not be empty")

@@ -56,6 +56,21 @@ terminal:
   command_timeout: 30m
   max_output_bytes: 1048576
 
+# Interactive coding-agent bridge (opencode / claude / codex / gemini). The
+# CLI is started in the selected project directory inside a PTY; its screen is
+# relayed to the chat. Only the owner can start/control it.
+agent:
+  enabled: true
+  # "" detects the first CLI available on PATH (opencode, claude, codex,
+  # gemini). Set a bare name or an absolute path to pin one.
+  # command: opencode
+  screen:
+    # "png" relays the agent screen as a colored image, "text" as a code block.
+    # This governs the live screen only. The screen posted when a session ends is
+    # always text, whatever this says: it is written output rather than a picture
+    # of one, so it stays copyable and searchable.
+    mode: png
+
 projects:
   #   api:
   #     path: /Users/user/projects/api

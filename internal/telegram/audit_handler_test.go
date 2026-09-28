@@ -20,6 +20,9 @@ func readAuditEntries(t *testing.T, path string) []audit.Entry {
 	}
 	var entries []audit.Entry
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
 		var e audit.Entry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
 			t.Fatalf("bad audit line %q: %v", line, err)

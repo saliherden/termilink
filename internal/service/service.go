@@ -57,6 +57,7 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		Audit:        auditLogger,
 		MaxFileBytes: cfg.Telegram.MaxFileBytes,
 		BigFileLink:  cfg.Telegram.BigFileLinkHost,
+		Agent:        cfg.Agent,
 	})
 
 	bot, err := tg.New(cfg.Telegram.BotToken, tg.WithDefaultHandler(handler.Callback()))

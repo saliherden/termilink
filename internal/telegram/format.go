@@ -15,10 +15,10 @@ var welcomeMsg = "*TermiLink — Remote Terminal*\n\n" +
 	"/start — show this message\n" +
 	"/help — show command help\n" +
 	"/project <name> — switch working directory to a configured project\n" +
-	"/status — show current session context and shell tail\n" +
+	"/status — show current session context, agent session and shell tail\n" +
 	"/input <text> — send input to the running command (e.g. `/input ctrl-c`)\n" +
 	"/stop — interrupt the running command (SIGINT)\n" +
-	"/exit — close the persistent shell\n" +
+	"/exit — close the agent session if any, then reset the session\n" +
 	"/sessions — list active terminal sessions\n" +
 	"/ping — health check\n\n" +
 	"*Usage*\n" +
@@ -32,7 +32,7 @@ const helpMsg = "*TermiLink Help*\n\n" +
 	"*Direct Terminal*\n" +
 	"Send any shell command as a plain message. Commands run inside a\n" +
 	"persistent interactive shell, so the working directory and environment\n" +
-	"are preserved; only whitelisted users can reach the agent.\n\n" +
+	"are preserved; only whitelisted users can reach this bot.\n\n" +
 	"*Project switching*\n" +
 	"/project <name>\n" +
 	"Lists projects with /projects and /help.\n\n" +
@@ -40,9 +40,30 @@ const helpMsg = "*TermiLink Help*\n\n" +
 	"/input <text> — write to the running command (newline appended)\n" +
 	"/input ctrl-c — send SIGINT to interrupt\n" +
 	"/stop — interrupt the running command\n" +
-	"/exit — close the shell\n\n" +
+	"/exit — close the agent session (if any) and the shell, and clear the\n" +
+	"project and working directory so the next command starts fresh\n\n" +
 	"*Session state*\n" +
-	"/status shows the project, working directory and shell tail for this chat."
+	"/status shows the project, working directory, the running agent session\n" +
+	"(`none` when there is none) and the shell tail for this chat.\n\n" +
+	"*Agent (TUI bridge)*\n" +
+	"`agent <prompt>` opens your coding-agent CLI (opencode / claude / codex / gemini) inside the selected project directory. Its screen is relayed here and every message you send is typed into it.\n" +
+	"• plain text → sent as a prompt\n" +
+	"• `^p` → Ctrl+P (command palette), then `^x l` → Ctrl+X + l (switch session), `^x n` new session\n" +
+	"• `up` `down` `left` `right` `esc` `enter` `tab` `pageup` `pagedown` → those keys, sent as real key bytes (the arrows `↑↓←→` work too)\n" +
+	"• multi-key chords work as one message: `^x l`, `^p enter`, `up enter`\n" +
+	"• a slash is only a command when the bot knows it. With an agent running, anything else (`/update.sh`, a flag, a typo) is typed into the TUI as text instead of being refused\n" +
+	"• `/agent history` opens the scrollback as one colored image, then `/agent up` and `/agent down` scroll it a screen at a time\n" +
+	"• `/agent top` `/agent bottom` jump to either end, `/agent history exit` drops the hint line and leaves the image in the chat\n" +
+	"• `/agent stop` or `/agent exit` — close the agent session: the final screen\n" +
+	"  is posted as text, then the session id (the shell keeps running)\n" +
+	"/agent status — show the running agent session (owner only)\n\n" +
+	"*Closing things*\n" +
+	"`/exit` — close the agent session (if any) and the shell, then reset the\n" +
+	"context: project binding, working directory and last command are cleared,\n" +
+	"so the next command starts fresh in your home directory. The agent's last\n" +
+	"screen is posted before it goes.\n" +
+	"`/agent exit` — close only the agent session, keep the shell.\n" +
+	"`/agent history exit` — close only the reader's hint line.\n"
 
 const (
 	pingOK  = "🏓 pong"

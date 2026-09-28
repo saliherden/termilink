@@ -214,3 +214,80 @@ func TestLoadMissingFile(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestLoadAgentDefaultsEnabled(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, "telegram:\n  bot_token: t\nsecurity:\n  allowed_users: [1]\n")
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Agent.Enabled {
+		t.Fatal("agent should default to enabled")
+	}
+	if cfg.Agent.Command != "" {
+		t.Fatalf("command should default empty, got %q", cfg.Agent.Command)
+	}
+	if cfg.Agent.Screen.Mode != "png" {
+		t.Fatalf("agent.screen.mode should default to png, got %q", cfg.Agent.Screen.Mode)
+	}
+}
+
+func TestLoadAgentSection(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+agent:
+  enabled: false
+  command: /custom/bin/opencode
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.Enabled {
+		t.Fatal("agent.enabled should be false")
+	}
+	if cfg.Agent.Command != "/custom/bin/opencode" {
+		t.Fatalf("command = %q, want /custom/bin/opencode", cfg.Agent.Command)
+	}
+}
+
+func TestLoadAgentScreenModeText(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+agent:
+  screen:
+    mode: text
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Agent.Screen.Mode != "text" {
+		t.Fatalf("mode = %q, want text", cfg.Agent.Screen.Mode)
+	}
+}
+
+func TestLoadAgentScreenModeInvalid(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+agent:
+  screen:
+    mode: gif
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("invalid agent.screen.mode should fail validation")
+	}
+}
