@@ -1,5 +1,7 @@
 # TermiLink
 
+![CI](https://github.com/saliherden/termilink/actions/workflows/ci.yml/badge.svg)
+
 > Remote terminal access and development automation for your own computer.
 
 TermiLink is a self-hosted remote terminal and development agent that lets you
@@ -50,7 +52,20 @@ logging with rotation).
 ## Requirements
 
 - Go 1.27.1+ (as required by `go.mod`)
+- zsh, bash or sh — TermiLink drives an interactive shell session; see
+  [Which shell is used](#which-shell-is-used) to pick one
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
+
+### Which shell is used
+
+`terminal.shell` in `config.yaml` decides. Left unset, TermiLink picks the first
+of `/bin/zsh`, `/bin/bash`, `/bin/sh` that exists on the machine.
+
+⚠️ **`config.example.yaml` sets `/bin/zsh` explicitly**, so copying it as-is
+(`cp config.example.yaml config.yaml`) overrides that auto-detection. On a
+machine without zsh, every shell command then fails — the path is not checked
+at load time, so the error only surfaces once you send the first command.
+Install zsh (`apt install zsh`) or point that one line at your own shell.
 
 ## Getting Started
 
@@ -728,6 +743,27 @@ make build
 make run
 make test
 ```
+
+## Contributing
+
+`master` is **protected** — direct pushes are rejected, and every change
+arrives as a pull request.
+
+Two checks are required, and both must be green before a PR can merge:
+
+| check | runner |
+| --- | --- |
+| `ubuntu-24.04` | Linux (pinned, not `ubuntu-latest`) |
+| `macos-latest` | macOS |
+
+Each job runs `gofmt` → `go build` → `go vet` → `go test -race`; `staticcheck`
+runs once, on the Linux job. No approval is required to merge, and nobody can
+bypass the checks.
+
+The Linux label is pinned on purpose: these tests drive a real `zsh` over a PTY
+and read the terminal's line settings, so they are sensitive to what the runner
+image happens to ship. A deliberate version bump is a visible diff and a test
+failure to read, rather than a surprise one Tuesday.
 
 ## License
 
