@@ -172,7 +172,18 @@ func (r *Runner) OpenShell(dir string, env []string) (*Shell, error) {
 
 func (s *Shell) waitReady() error {
 	marker := nextShellMarker()
-	init := "stty -echo; unsetopt zle; unsetopt flowcontrol; setopt no_beep; PROMPT='" + shellSentinel + "'; RPROMPT=''; echo REQ_" + marker + "\n"
+	// The marker is parked in a shell variable rather than pasted into the
+	// echo argument, so the literal text "REQ_<marker>" never appears in the
+	// line being sent.
+	//
+	// That matters because the PTY echoes this line before zsh runs any of
+	// it, and the echo is in the buffer within milliseconds. Written out
+	// literally, the echo alone satisfies the readiness check below and
+	// OpenShell returns while stty -echo has not run yet — leaving echo on,
+	// so every later command reads back its own echoed frame instead of its
+	// result. It is a race, and it is a wide one on a slow machine: on Linux
+	// every attempt was wrong, on a fast one never.
+	init := "stty -echo; unsetopt zle; unsetopt flowcontrol; setopt no_beep; PROMPT='" + shellSentinel + "'; RPROMPT=''; m='" + marker + "'; echo REQ_$m\n"
 	if err := s.writeString(init); err != nil {
 		return err
 	}

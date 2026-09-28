@@ -122,6 +122,56 @@ func TestShellPersistenceAcrossCommands(t *testing.T) {
 	}
 }
 
+// TestOpenShellTurnsEchoOff guards the invariant every command frame depends
+// on. If echo is still on, the PTY sends back the line we just wrote, and since
+// that echo contains the frame markers verbatim, ExecCommand reports the
+// command as finished before it has run and hands the caller its own command
+// line instead of its output. The readiness check used to be satisfied by the
+// echo of its own setup line, so this only failed on slower machines — Linux
+// failed every time, a fast machine never.
+//
+// One occurrence of the probe means the command ran and nothing echoed it.
+// Two means the echo is on.
+func TestOpenShellTurnsEchoOff(t *testing.T) {
+	const attempts = 5
+	probe := "probe-" + nextShellMarker()
+
+	for i := 1; i <= attempts; i++ {
+		func() {
+			r := testRunner()
+			s, err := r.OpenShell("", nil)
+			if err != nil {
+				t.Fatalf("attempt %d: open shell: %v", i, err)
+			}
+			defer s.Close()
+
+			if err := s.Write([]byte("echo " + probe + "\n")); err != nil {
+				t.Fatalf("attempt %d: write probe: %v", i, err)
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if countOccurrences(string(s.Output()), probe) > 0 {
+					break
+				}
+				time.Sleep(25 * time.Millisecond)
+			}
+			if n := countOccurrences(string(s.Output()), probe); n != 1 {
+				t.Fatalf("attempt %d: probe appears %d times, want 1 (echo is on)", i, n)
+			}
+		}()
+	}
+}
+
+func countOccurrences(hay, needle string) int {
+	c := 0
+	for i := 0; i+len(needle) <= len(hay); i++ {
+		if hay[i:i+len(needle)] == needle {
+			c++
+		}
+	}
+	return c
+}
+
 // TestLastIndexOf pins the helper the frame slicing depends on, including the
 // overlap case where a naive backwards scan that steps back one byte at a time
 // would find the wrong offset.
