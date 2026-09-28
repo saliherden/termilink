@@ -348,7 +348,7 @@ func (h *Handler) deliverFile(ctx context.Context, b *tg.Bot, chatID int64, user
 // path is kept only for display. The caller hands over archive ownership.
 func (h *Handler) enqueueLinkApproval(ctx context.Context, b *tg.Bot, chatID int64, userID int64, original, archive string, size int64) (string, error) {
 	if h.filesPendingFor(chatID) != nil {
-		return "", fmt.Errorf("a link approval is already pending — answer it with *yes* / *no* first, then `get` the file again.")
+		return "", fmt.Errorf("a link approval is already pending — answer it with *yes* / *no* first, then `get` the file again")
 	}
 	req := pendingFile{
 		userID:  userID,

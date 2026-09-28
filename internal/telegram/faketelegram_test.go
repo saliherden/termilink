@@ -105,8 +105,12 @@ type fakeTelegram struct {
 	// each one carried, so a test can tell a repainted document from a repainted
 	// photo. The scrollback reader relies on this: it must stay one message.
 	mediaEdits []string
-	srv        *httptest.Server
-	bot        *tg.Bot
+	// chatActions records sendChatAction calls (the "typing…" indicator the
+	// relay keeps alive while the TUI is redrawing). The API call carries an
+	// action and no text, so it is invisible to the message log.
+	chatActions []string
+	srv         *httptest.Server
+	bot         *tg.Bot
 }
 
 func newFakeTelegram(t *testing.T) *fakeTelegram {
@@ -129,6 +133,12 @@ func newFakeTelegram(t *testing.T) *fakeTelegram {
 			// racing the relay that uploads its own photo every tick.
 			for _, fhs := range r.MultipartForm.File["photo"] {
 				f.photos = append(f.photos, fhs.Filename)
+			}
+			// The library builds every request as multipart, including the ones with
+			// no file at all, so sendChatAction arrives here too — as a form value
+			// rather than the JSON the old branch expected.
+			if action := r.FormValue("action"); action != "" {
+				f.chatActions = append(f.chatActions, action)
 			}
 			// editMessageMedia posts the new media as a JSON `media` field plus one
 			// attach:// upload part, so the declared type is what identifies it.
@@ -254,6 +264,14 @@ func (f *fakeTelegram) mediaEditTypes() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string(nil), f.mediaEdits...)
+}
+
+// chatActionCount counts sendChatAction calls, so a test can assert that the
+// "typing…" indicator is actually being sent.
+func (f *fakeTelegram) chatActionCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.chatActions)
 }
 
 // exitsPosted counts how many times an agent-exit announcement was delivered, so

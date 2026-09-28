@@ -1014,6 +1014,71 @@ func TestRelayStillSendsPhotos(t *testing.T) {
 	}
 }
 
+// TestTypingIndicatorFollowsThePtyPump pins the "typing…" indicator to real TUI
+// output. The indicator is only meant to show while the screen is actively
+// redrawing, which is what the PTY pump reports: its onPkt callback stamps
+// lastPkt. That callback used to be handed to agent.Start as nil, so lastPkt
+// stayed at the zero time, the freshness check in maybeTyping never held, and
+// the indicator was silently never sent at all. This is the regression test for
+// that: a run that has produced output must be able to show typing.
+func TestTypingIndicatorFollowsThePtyPump(t *testing.T) {
+	h, _ := testAgentHandler(t, writeAgentFixture(t))
+	f := newFakeTelegram(t)
+	selectTestProject(t, h, 150)
+	h.handle(context.Background(), f.bot, 150, testAgentOwner, "agent ")
+	run := h.agentSessionFor(150)
+	if run == nil {
+		t.Fatal("agent session not registered")
+	}
+	waitAgentFrame(t, run, "ready>")
+
+	run.mu.Lock()
+	lastPkt := run.lastPkt
+	run.mu.Unlock()
+	if lastPkt.IsZero() {
+		t.Fatal("the PTY pump never stamped lastPkt, so maybeTyping can never fire")
+	}
+
+	// waitAgentFrame waits for the screen, by which point the fixture has gone
+	// quiet and lastPkt is legitimately stale. Re-stamp it to stand in for a TUI
+	// that is redrawing right now, which is the state the indicator is for.
+	run.mu.Lock()
+	run.lastPkt = time.Now()
+	run.mu.Unlock()
+
+	before := f.chatActionCount()
+	h.maybeTyping(run)
+	if f.chatActionCount() <= before {
+		t.Fatalf("the screen is redrawing but no typing action was sent; actions: %v", f.chatActions)
+	}
+}
+
+// TestTypingIndicatorStaysQuietWithoutOutput is the other half: the indicator
+// must not run forever on an idle session. With no packet stamped, maybeTyping
+// has to decide the screen is quiet and send nothing.
+func TestTypingIndicatorStaysQuietWithoutOutput(t *testing.T) {
+	h, _ := testAgentHandler(t, writeAgentFixture(t))
+	f := newFakeTelegram(t)
+	selectTestProject(t, h, 151)
+	h.handle(context.Background(), f.bot, 151, testAgentOwner, "agent ")
+	run := h.agentSessionFor(151)
+	if run == nil {
+		t.Fatal("agent session not registered")
+	}
+
+	// Simulate a session that went silent: pretend the last packet was long ago
+	// by never stamping it, which is the same state the pump would leave behind
+	// after the TUI stopped writing.
+	run.mu.Lock()
+	run.lastPkt = time.Time{}
+	run.mu.Unlock()
+
+	h.maybeTyping(run)
+	if n := f.chatActionCount(); n != 0 {
+		t.Fatalf("a silent session sent %d typing actions", n)
+	}
+}
+
 // TestExitWithoutAgentStaysQuiet makes sure the new teardown does not add noise
 // to the ordinary case: with no agent running, /exit is one message as before.
 func TestExitWithoutAgentStaysQuiet(t *testing.T) {

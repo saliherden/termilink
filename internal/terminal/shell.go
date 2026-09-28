@@ -259,6 +259,42 @@ func indexOf(hay, needle []byte) int {
 	return -1
 }
 
+// lastIndexOf returns the offset of the final occurrence of needle, or -1.
+func lastIndexOf(hay, needle []byte) int {
+	if len(needle) == 0 {
+		return len(hay)
+	}
+	for i := len(hay) - len(needle); i >= 0; i-- {
+		if string(hay[i:i+len(needle)]) == string(needle) {
+			return i
+		}
+	}
+	return -1
+}
+
+// sliceFrame returns the output a command produced between its markers, or nil
+// if the closing marker has not arrived yet.
+//
+// It matches the LAST occurrence of each marker rather than the first. The
+// shell can echo the frame it was sent, and that echo repeats the marker text
+// verbatim, so a first-occurrence search finds the echoed command line, returns
+// it as if it were the result, and silently discards the real output — the
+// command appears to have run, reports success, and prints nothing. Echo is not
+// guaranteed to be off, so the marker trick has to survive a shell that talks
+// back. The genuine markers are the ones printed after the echo, which is why
+// the start search is bounded by the stop offset.
+func sliceFrame(data []byte, startTok, stopTok string) []byte {
+	ei := lastIndexOf(data, []byte(stopTok))
+	if ei < 0 {
+		return nil
+	}
+	si := lastIndexOf(data[:ei], []byte(startTok))
+	if si < 0 {
+		si = 0
+	}
+	return data[si+len(startTok) : ei]
+}
+
 // Write sends raw bytes to the shell's stdin.
 func (s *Shell) Write(data []byte) error {
 	s.mu.Lock()
@@ -354,16 +390,10 @@ func (s *Shell) ExecCommand(ctx context.Context, command string) ([]byte, error)
 		s.mu.Unlock()
 	}()
 
+	// cmdFinished returns the output the command actually produced, or nil while
+	// the command is still running.
 	cmdFinished := func(data []byte) []byte {
-		ei := indexOf(data, []byte(stopTok))
-		if ei < 0 {
-			return nil
-		}
-		si := indexOf(data, []byte(startTok))
-		if si < 0 || si > ei {
-			si = 0
-		}
-		return data[si+len(startTok) : ei]
+		return sliceFrame(data, startTok, stopTok)
 	}
 
 	partial := func() []byte {

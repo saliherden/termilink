@@ -188,23 +188,31 @@ func (h *Handler) handleAgentStart(ctx context.Context, b *tg.Bot, chatID int64,
 	// startMs is recorded immediately before the launch, not after, so a session
 	// created during startup still falls inside the run's lifetime.
 	startMs := time.Now().UnixMilli()
-	sess, err := agent.Start([]string{bin}, p.Path, h.projectEnv(st), nil)
-	if err != nil {
-		h.auditEvent(entryFor(chatID, userID, true, audit.ActionAgentError, prompt))
-		h.send(ctx, b, chatID, formatErr("failed to start agent: "+err.Error()))
-		return
-	}
 
+	// The run is built before the PTY starts so notePacket can be handed over as
+	// the onPkt callback. onPkt fires from the pump goroutine the moment the
+	// process writes anything, and it is what keeps lastPkt current; without it
+	// maybeTyping compares against the zero time, the condition is never true and
+	// the "typing…" indicator silently never appears. notePacket only touches the
+	// run's own mutex-guarded timestamp, so passing the method value is safe even
+	// though sess is not assigned yet.
 	run := &agentRun{
 		chatID:  chatID,
 		project: st.Project,
 		dir:     p.Path,
-		sess:    sess,
 		bot:     b,
 		bin:     bin,
 		startMs: startMs,
 		pngMode: h.agentCfg.Screen.Mode != "text",
 	}
+
+	sess, err := agent.Start([]string{bin}, p.Path, h.projectEnv(st), run.notePacket)
+	if err != nil {
+		h.auditEvent(entryFor(chatID, userID, true, audit.ActionAgentError, prompt))
+		h.send(ctx, b, chatID, formatErr("failed to start agent: "+err.Error()))
+		return
+	}
+	run.sess = sess
 	h.agentMu.Lock()
 	h.agents[chatID] = run
 	h.agentMu.Unlock()
@@ -544,17 +552,6 @@ func (h *Handler) repaintHistoryText(ctx context.Context, b *tg.Bot, run *agentR
 }
 
 // sendAgentPhoto uploads a rendered screen image to the chat.
-func (h *Handler) sendAgentPhoto(ctx context.Context, b *tg.Bot, chatID int64, img []byte, caption string) {
-	if b == nil {
-		return
-	}
-	_, _ = b.SendPhoto(ctx, &tg.SendPhotoParams{
-		ChatID:  chatID,
-		Photo:   &models.InputFileUpload{Filename: "agent.png", Data: bytes.NewReader(img)},
-		Caption: caption,
-	})
-}
-
 // relay mirrors the agent TUI screen into Telegram: one conversation message
 // per user turn is live-edited while the TUI renders and stays as the final
 // frame once output goes quiet.
@@ -686,7 +683,13 @@ func (h *Handler) renderFramePNG(run *agentRun, img []byte) {
 // redrawing, so the relay feels like a live terminal.
 func (h *Handler) maybeTyping(run *agentRun) {
 	now := time.Now()
-	if now.Sub(run.lastPkt) < agentDebounce*4 && now.Sub(run.lastTyping) > agentTypingEvery {
+	// Both stamps are read under the mutex. lastPkt in particular is written
+	// from the PTY pump goroutine (onPkt -> notePacket), so reading it bare here
+	// is a data race the moment the agent actually renders.
+	run.mu.Lock()
+	lastPkt, lastTyping := run.lastPkt, run.lastTyping
+	run.mu.Unlock()
+	if now.Sub(lastPkt) < agentDebounce*4 && now.Sub(lastTyping) > agentTypingEvery {
 		_, _ = run.bot.SendChatAction(context.Background(), &tg.SendChatActionParams{ChatID: run.chatID, Action: models.ChatActionTyping})
 		run.mu.Lock()
 		run.lastTyping = now

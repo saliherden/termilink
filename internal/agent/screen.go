@@ -851,7 +851,7 @@ func (s *Screen) deleteChars(b *buffer, n int) {
 		to = s.colsOf(b)
 	}
 	blank := s.blankCell()
-	kept := append([]cell(nil), row[to:len(row)]...)
+	kept := append([]cell(nil), row[to:]...)
 	for i := 0; i < to-from; i++ {
 		kept = append(kept, blank)
 	}

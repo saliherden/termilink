@@ -3,6 +3,7 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -118,6 +119,60 @@ func TestShellPersistenceAcrossCommands(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "bar") {
 		t.Fatalf("env not preserved: %q", out)
+	}
+}
+
+// TestLastIndexOf pins the helper the frame slicing depends on, including the
+// overlap case where a naive backwards scan that steps back one byte at a time
+// would find the wrong offset.
+func TestLastIndexOf(t *testing.T) {
+	hay := []byte("S_mark# output S_mark#")
+	if got := lastIndexOf(hay, []byte("S_mark#")); got != 15 {
+		t.Fatalf("last offset = %d, want 15", got)
+	}
+	if got := lastIndexOf(hay, []byte("nope")); got != -1 {
+		t.Fatalf("missing needle = %d, want -1", got)
+	}
+	if got := lastIndexOf([]byte("aaaa"), []byte("aa")); got != 2 {
+		t.Fatalf("overlap offset = %d, want 2", got)
+	}
+}
+
+// TestSliceFrameSurvivesShellEcho is the regression guard for output that
+// vanished while still reporting success. When the shell echoes the frame it
+// was sent, the echo contains both markers verbatim, so scanning for the first
+// match returned the echoed command line and threw the real output away. The
+// buffer here is exactly that shape: the echoed frame, then what the shell
+// actually printed.
+func TestSliceFrameSurvivesShellEcho(t *testing.T) {
+	marker := "tlmk_1_7"
+	startTok := "S_" + marker + "#"
+	stopTok := "E_" + marker + "#"
+	cmd := `echo "[cwd=$PWD][project=$TERMILINK_PROJECT]"`
+	frame := fmt.Sprintf("printf '\\n%s'; %s; printf 'TLM_PWD:%%s\\n' \"$PWD\"; printf '%s'\\n",
+		startTok, cmd, stopTok)
+
+	echoed := frame + startTok + "\n[cwd=/home/x][project=]\nTLM_PWD:/home/x\n" + stopTok
+
+	got := string(sliceFrame([]byte(echoed), startTok, stopTok))
+	if !strings.Contains(got, "[project=]") {
+		t.Fatalf("real output lost to the shell echo: %q", got)
+	}
+	if strings.Contains(got, "printf 'TLM_PWD:") {
+		t.Fatalf("returned the echoed frame instead of the output: %q", got)
+	}
+}
+
+// TestSliceFrameWaitsForCloseMarker keeps the nil-until-done contract: without
+// the closing marker there is no result to report yet.
+func TestSliceFrameWaitsForCloseMarker(t *testing.T) {
+	marker := "tlmk_1_8"
+	startTok := "S_" + marker + "#"
+	stopTok := "E_" + marker + "#"
+
+	partial := []byte("S_" + marker + "#\npartial output\n")
+	if got := sliceFrame(partial, startTok, stopTok); got != nil {
+		t.Fatalf("returned a result before the close marker: %q", got)
 	}
 }
 
