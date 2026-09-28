@@ -92,12 +92,28 @@ type Shell struct {
 	stopped atomic.Bool
 }
 
-func prepareZDotDir() (string, error) {
+// prepareZDotDir creates a throwaway ZDOTDIR whose .zshrc configures the
+// shell for framed command capture: echo off, no line editor, and a sentinel
+// prompt. The marker argument makes the shell report readiness on startup.
+//
+// This runs from .zshrc rather than from a line typed into the terminal
+// because zsh sources it before it ever starts the line editor. Typed in, the
+// setup would be echoed back by the PTY and the terminal state would depend on
+// zsh's timing for turning the editor off after the line has been read —
+// which is exactly what left echo enabled on some platforms.
+func prepareZDotDir(marker string) (string, error) {
 	zdir, err := os.MkdirTemp("", "termilink-zdot-*")
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(filepath.Join(zdir, ".zshrc"), nil, 0o600); err != nil {
+	zshrc := "stty -echo 2>/dev/null\n" +
+		"unsetopt zle\n" +
+		"unsetopt flowcontrol\n" +
+		"setopt no_beep\n" +
+		"PROMPT='" + shellSentinel + "'\n" +
+		"RPROMPT=''\n" +
+		"echo REQ_" + marker + "\n"
+	if err := os.WriteFile(filepath.Join(zdir, ".zshrc"), []byte(zshrc), 0o600); err != nil {
 		_ = os.RemoveAll(zdir)
 		return "", err
 	}
@@ -116,7 +132,8 @@ func (r *Runner) OpenShell(dir string, env []string) (*Shell, error) {
 	if r.shell == "" {
 		return nil, fmt.Errorf("terminal: no shell configured")
 	}
-	zdir, err := prepareZDotDir()
+	marker := nextShellMarker()
+	zdir, err := prepareZDotDir(marker)
 	if err != nil {
 		return nil, fmt.Errorf("prepare zdotdir: %w", err)
 	}
@@ -163,30 +180,26 @@ func (r *Runner) OpenShell(dir string, env []string) (*Shell, error) {
 		s.markDone()
 	}()
 
-	if err := s.waitReady(); err != nil {
+	if err := s.waitReady(marker); err != nil {
 		s.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Shell) waitReady() error {
-	marker := nextShellMarker()
-	// The marker is parked in a shell variable rather than pasted into the
-	// echo argument, so the literal text "REQ_<marker>" never appears in the
-	// line being sent.
-	//
-	// That matters because the PTY echoes this line before zsh runs any of
-	// it, and the echo is in the buffer within milliseconds. Written out
-	// literally, the echo alone satisfies the readiness check below and
-	// OpenShell returns while stty -echo has not run yet — leaving echo on,
-	// so every later command reads back its own echoed frame instead of its
-	// result. It is a race, and it is a wide one on a slow machine: on Linux
-	// every attempt was wrong, on a fast one never.
-	init := "stty -echo; unsetopt zle; unsetopt flowcontrol; setopt no_beep; PROMPT='" + shellSentinel + "'; RPROMPT=''; m='" + marker + "'; echo REQ_$m\n"
-	if err := s.writeString(init); err != nil {
-		return err
-	}
+// waitReady blocks until the shell has run its setup and reported back.
+//
+// The setup itself is not typed into the PTY — prepareZDotDir puts it in the
+// throwaway .zshrc instead. Sending it as a line was the bug this replaced: a
+// line written to the PTY comes back echoed, and the echo carried the very
+// markers the rest of the code reads. Echo has to be off before any command
+// frame is sent, otherwise ExecCommand matches the markers in the echo and
+// reports a command finished before it has run, handing the caller its own
+// command line as the output. Where the echo text sits in the buffer is
+// decided by the terminal and by zsh's line editor, so it cannot be worked
+// around by rearranging the line; the only reliable answer is to never write
+// the setup through the PTY at all.
+func (s *Shell) waitReady(marker string) error {
 	deadline := time.Now().Add(shellOpenTimeout)
 	for time.Now().Before(deadline) {
 		if !s.IsAlive() {
@@ -196,7 +209,7 @@ func (s *Shell) waitReady() error {
 			s.buf.Reset()
 			return nil
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	return fmt.Errorf("shell did not become ready within %s", shellOpenTimeout)
 }

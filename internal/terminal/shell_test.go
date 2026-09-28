@@ -126,12 +126,14 @@ func TestShellPersistenceAcrossCommands(t *testing.T) {
 // on. If echo is still on, the PTY sends back the line we just wrote, and since
 // that echo contains the frame markers verbatim, ExecCommand reports the
 // command as finished before it has run and hands the caller its own command
-// line instead of its output. The readiness check used to be satisfied by the
-// echo of its own setup line, so this only failed on slower machines — Linux
-// failed every time, a fast machine never.
+// line instead of its output.
 //
-// One occurrence of the probe means the command ran and nothing echoed it.
-// Two means the echo is on.
+// One occurrence of the probe means the command ran and nothing echoed it;
+// two means the echo is on.
+//
+// The wait is for the prompt sentinel that follows the probe, not for the
+// probe's first appearance: the echo arrives first, so stopping at the first
+// sighting would read a single occurrence and pass while echo is on.
 func TestOpenShellTurnsEchoOff(t *testing.T) {
 	const attempts = 5
 	probe := "probe-" + nextShellMarker()
@@ -150,16 +152,28 @@ func TestOpenShellTurnsEchoOff(t *testing.T) {
 			}
 			deadline := time.Now().Add(5 * time.Second)
 			for time.Now().Before(deadline) {
-				if countOccurrences(string(s.Output()), probe) > 0 {
+				// Sentinel after the probe means the command has finished.
+				if at := lastIndexOf(s.Output(), []byte(probe)); at >= 0 &&
+					lastIndexOf(s.Output(), []byte(shellSentinel)) > at {
 					break
 				}
-				time.Sleep(25 * time.Millisecond)
+				time.Sleep(10 * time.Millisecond)
 			}
 			if n := countOccurrences(string(s.Output()), probe); n != 1 {
-				t.Fatalf("attempt %d: probe appears %d times, want 1 (echo is on)", i, n)
+				t.Fatalf("attempt %d: probe appears %d times, want 1 (echo is on)\n%s",
+					i, n, describeTerminalState(s))
 			}
 		}()
 	}
+}
+
+// describeTerminalState renders what the shell thinks its terminal is doing,
+// for the failure message. The terminal mode is read by typing a command
+// directly rather than through ExecCommand, which is the thing under suspicion.
+func describeTerminalState(s *Shell) string {
+	_ = s.Write([]byte("stty -a; echo done-$?; zsh -c 'echo ZSH=$ZSH_VERSION'\n"))
+	time.Sleep(500 * time.Millisecond)
+	return fmt.Sprintf("buffer: %q", string(s.Output()))
 }
 
 func countOccurrences(hay, needle string) int {
