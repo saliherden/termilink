@@ -2,7 +2,7 @@ BINARY := termilink
 PKG := ./cmd/termilink
 GOFLAGS ?=
 
-.PHONY: all build run test vet fmt clean install lint
+.PHONY: all build run test test-race vet fmt clean install lint
 
 all: build
 
@@ -17,6 +17,11 @@ run:
 
 test:
 	go test ./...
+
+# What CI runs. Slower than `make test`, and it is the only way the agent
+# relay's shared-timestamp race shows up locally.
+test-race:
+	go test -race -timeout 15m ./...
 
 vet:
 	go vet ./...

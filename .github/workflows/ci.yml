@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+# The workflow only ever needs to read the code.
+permissions:
+  contents: read
+
+# A second push to the same ref makes the first run pointless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Report both operating systems even when one fails: they are separate
+      # facts, and a macOS-only failure still needs the Linux result.
+      fail-fast: false
+      matrix:
+        # Windows is absent on purpose. creack/pty compiles there, but
+        # StartWithSize returns ErrUnsupported at runtime, so every PTY test
+        # would fail on a runner that could never be made to pass.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.x"
+          cache: true
+
+      - name: Install zsh
+        # internal/terminal and internal/telegram drive a real /bin/zsh for the
+        # persistent-shell tests, so the runner has to have one.
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
+
+      # Ordered cheapest-first, so a formatting slip fails in seconds instead
+      # of after the full race suite.
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        # The race detector is the point of this job, not an extra: the
+        # duplicate read of a shared timestamp in the agent relay only shows up
+        # here. The timeout is generous because the PTY tests wait on real
+        # shells.
+        run: go test -race -timeout 15m ./...
+
+      - name: Staticcheck
+        # Platform-independent, so it runs once. Pinned on purpose: an
+        # unpinned @latest would let a new release turn a green build red for
+        # reasons that have nothing to do with this commit.
+        if: runner.os == 'Linux'
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...

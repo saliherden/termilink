@@ -15,6 +15,12 @@ import (
 	"github.com/saliherden/termilink/internal/terminal"
 )
 
+// extraBotOptions carries no options in production, and exists so tests can
+// reach the rest of New. tg.New calls getMe while constructing the client, so
+// without tg.WithSkipGetMe() the wiring below is only reachable with the real
+// Telegram API and a real token.
+var extraBotOptions []tg.Option
+
 type Service struct {
 	cfg      *config.Config
 	bot      *tg.Bot
@@ -60,7 +66,8 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		Agent:        cfg.Agent,
 	})
 
-	bot, err := tg.New(cfg.Telegram.BotToken, tg.WithDefaultHandler(handler.Callback()))
+	opts := append([]tg.Option{tg.WithDefaultHandler(handler.Callback())}, extraBotOptions...)
+	bot, err := tg.New(cfg.Telegram.BotToken, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create telegram bot: %w", err)
 	}
