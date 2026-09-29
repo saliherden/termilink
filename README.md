@@ -746,19 +746,15 @@ make test
 
 ## Contributing
 
-`master` is **protected** — direct pushes are rejected, and every change
-arrives as a pull request.
+`master` is **protected** — outside contributors go through a pull request. The
+repository owner is deliberately exempt from that requirement and can push
+straight to `master`, so a stale branch is never a reason to skip the checks.
 
-Two checks are required, and both must be green before a PR can merge:
-
-| check | runner |
-| --- | --- |
-| `ubuntu-24.04` | Linux (pinned, not `ubuntu-latest`) |
-| `macos-latest` | macOS |
-
-Each job runs `gofmt` → `go build` → `go vet` → `go test -race`; `staticcheck`
-runs once, on the Linux job. No approval is required to merge, and nobody can
-bypass the checks.
+CI runs two jobs, `ubuntu-24.04` and `macos-latest`. Each runs
+`gofmt` → `go build` → `go vet` → `go test -race`, and `staticcheck` runs once,
+on the Linux job. Green in both is the bar for anything arriving as a pull
+request; note that these are not currently enforced as required status checks,
+so a red run is possible on a pull request.
 
 The Linux label is pinned on purpose: these tests drive a real `zsh` over a PTY
 and read the terminal's line settings, so they are sensitive to what the runner
