@@ -70,15 +70,19 @@ func (m *Manager) Ensure(id string) *State {
 	return s
 }
 
-func (m *Manager) Save() {
+// Save writes the session list to the state file, reporting any failure to the
+// caller. A gateway that silently drops this error loses every session on
+// restart while its audit log still reads "ok", so callers should log what
+// comes back.
+func (m *Manager) Save() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.saveLocked()
+	return m.saveLocked()
 }
 
-func (m *Manager) saveLocked() {
+func (m *Manager) saveLocked() error {
 	if m.stateFile == "" {
-		return
+		return nil
 	}
 	list := make([]State, 0, len(m.sessions))
 	for _, s := range m.sessions {
@@ -87,12 +91,12 @@ func (m *Manager) saveLocked() {
 	sort.Slice(list, func(i, j int) bool { return list[i].ID < list[j].ID })
 	data, err := json.MarshalIndent(list, "", "  ")
 	if err != nil {
-		return
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0o755); err != nil {
-		return
+		return err
 	}
-	_ = os.WriteFile(m.stateFile, data, 0o644)
+	return os.WriteFile(m.stateFile, data, 0o644)
 }
 
 func (m *Manager) List() []*State {

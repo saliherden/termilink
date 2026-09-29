@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -31,7 +32,9 @@ func TestStateFileRoundTrip(t *testing.T) {
 	s.Cwd = "/tmp/project"
 	s.Project = "mobile"
 	s.LastCmd = "ls"
-	m.Save()
+	if err := m.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 
 	m2 := NewManagerWithStateFile(path)
 	got, ok := m2.Get("chat1")
@@ -58,7 +61,9 @@ func TestRuntimeFieldsNotPersisted(t *testing.T) {
 	s := m.Ensure("chat1")
 	s.Active = true
 	s.PID = 4242
-	m.Save()
+	if err := m.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
 
 	m2 := NewManagerWithStateFile(path)
 	got, ok := m2.Get("chat1")
@@ -70,5 +75,33 @@ func TestRuntimeFieldsNotPersisted(t *testing.T) {
 	}
 	if got.PID != 0 {
 		t.Fatalf("PID must not survive a restart, got %d", got.PID)
+	}
+}
+
+// TestSaveReportsUnwritablePath is the regression for silent data loss: a state
+// file the manager cannot create must come back as an error, not a no-op. A
+// regular file standing where the directory belongs is used instead of a
+// permission trick so the test works regardless of the user it runs as.
+func TestSaveReportsUnwritablePath(t *testing.T) {
+	blocker := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocker, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m := NewManagerWithStateFile(filepath.Join(blocker, "nested", "state.json"))
+	m.Ensure("chat1")
+
+	if err := m.Save(); err == nil {
+		t.Fatal("Save reported success for a state file it could not create")
+	}
+}
+
+// TestSaveWithoutStateFileStaysQuiet keeps the memory-only manager working: a
+// caller that never configured a state file has nothing to persist, so an error
+// would be noise.
+func TestSaveWithoutStateFileStaysQuiet(t *testing.T) {
+	m := NewManager()
+	m.Ensure("chat1")
+	if err := m.Save(); err != nil {
+		t.Fatalf("Save with no state file = %v, want nil", err)
 	}
 }

@@ -32,11 +32,13 @@ func testConfig(t *testing.T) *config.Config {
 
 // skipGetMe drops the getMe call tg.New makes while constructing the client.
 // Without it these tests would need the real Telegram API, and a gateway that
-// cannot be built offline cannot be tested at all.
-func skipGetMe(t *testing.T) {
+// cannot be built offline cannot be tested at all. extra carries any further
+// options the test needs, typically tg.WithServerURL so a fake API can stand
+// in for the real host.
+func skipGetMe(t *testing.T, extra ...tg.Option) {
 	t.Helper()
 	prev := extraBotOptions
-	extraBotOptions = []tg.Option{tg.WithSkipGetMe()}
+	extraBotOptions = append([]tg.Option{tg.WithSkipGetMe()}, extra...)
 	t.Cleanup(func() { extraBotOptions = prev })
 }
 
@@ -186,5 +188,27 @@ func TestNewAuditLoggerWritesAPrivateFile(t *testing.T) {
 	// by anyone else on a shared machine.
 	if perm := info.Mode().Perm(); perm != 0o600 {
 		t.Errorf("audit log mode = %04o, want 0600", perm)
+	}
+}
+
+// TestNewRefusesAnUnresolvableStateFile guards the silent-data-loss case. With
+// no home directory the session manager's Save is a no-op, so the gateway would
+// start, answer every message, and quietly forget every session on restart.
+// The audit log already refuses to start in this state; session state must not
+// be the one place that stays silent, and that has to hold even with auditing
+// explicitly turned off.
+func TestNewRefusesAnUnresolvableStateFile(t *testing.T) {
+	skipGetMe(t)
+	cfg := testConfig(t)
+	cfg.Security.AuditLog = "off"
+	// os.UserHomeDir reports an error for an empty HOME, which is what a
+	// systemd unit or a stripped container hands the agent.
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	if _, err := New(cfg, nil); err == nil {
+		t.Fatal("New started with nowhere to persist session state")
+	} else if !strings.Contains(err.Error(), "session state file") {
+		t.Errorf("error = %q, want it to mention the session state file", err)
 	}
 }

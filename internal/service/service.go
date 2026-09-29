@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -45,7 +46,15 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		cfg.Terminal.CommandTimeout.Std(),
 		cfg.Terminal.MaxOutputBytes,
 	)
-	sessions := session.NewManagerWithStateFile(session.DefaultStateFile())
+	// Manager.Save is a no-op without a state file, so an unresolvable home
+	// would start a gateway that looks healthy and forgets every session on
+	// restart. The audit log already refuses to start in that case; this keeps
+	// the session state from being the one silent exception.
+	stateFile := session.DefaultStateFile()
+	if stateFile == "" {
+		return nil, errors.New("resolve session state file: no home directory")
+	}
+	sessions := session.NewManagerWithStateFile(stateFile)
 
 	auditLogger, err := newAuditLogger(cfg)
 	if err != nil {
@@ -66,7 +75,18 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 		Agent:        cfg.Agent,
 	})
 
-	opts := append([]tg.Option{tg.WithDefaultHandler(handler.Callback())}, extraBotOptions...)
+	// The library reports polling failures to its own handler, which defaults
+	// to a bare log.Printf on stderr. Routing them into the app's logger keeps
+	// them in the same structured stream as everything else, so an outage that
+	// started after boot is visible in one place. It retries forever rather
+	// than giving up, and the backoff tops out at five seconds, so this cannot
+	// flood the log.
+	opts := append([]tg.Option{
+		tg.WithDefaultHandler(handler.Callback()),
+		tg.WithErrorsHandler(func(err error) {
+			logger.Warn("telegram api error", "err", err)
+		}),
+	}, extraBotOptions...)
 	bot, err := tg.New(cfg.Telegram.BotToken, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("create telegram bot: %w", err)
@@ -91,7 +111,9 @@ func (s *Service) Run(ctx context.Context) error {
 	)
 	defer s.handler.Close()
 	s.bot.Start(ctx)
-	s.sessions.Save()
+	if err := s.sessions.Save(); err != nil {
+		s.logger.Warn("could not persist session state on shutdown", "err", err)
+	}
 	s.logger.Info("termilink agent stopped")
 	return nil
 }

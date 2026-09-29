@@ -145,6 +145,17 @@ func (h *Handler) auditEvent(e audit.Entry) {
 	h.audit.Audit(e)
 }
 
+// saveSessions persists session state and reports a failure instead of
+// dropping it: a lost write silently resets the session on the next restart,
+// while the user still got a "done" reply and the audit log still reads "ok".
+// h.log is nil in tests that construct a Handler without a Logger, so the
+// warning is guarded the same way auditEvent guards a nil audit.
+func (h *Handler) saveSessions() {
+	if err := h.sessions.Save(); err != nil && h.log != nil {
+		h.log.Warn("could not persist session state", "err", err)
+	}
+}
+
 // entryFor builds a redacted audit entry from chat/user context.
 func entryFor(chatID, userID int64, owner bool, action, raw string) audit.Entry {
 	return audit.Entry{
@@ -407,7 +418,7 @@ func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, us
 	h.closeShellFor(st.ID)
 	st.Cwd = p.Path
 	st.Project = name
-	h.sessions.Save()
+	h.saveSessions()
 
 	e := entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionProjectSwitch, name)
 	e.Detail = p.Path
@@ -503,7 +514,7 @@ func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userI
 	}
 	st.Project = ""
 	st.LastCmd = ""
-	h.sessions.Save()
+	h.saveSessions()
 	h.auditEvent(entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionExit, "/exit"))
 	h.sendPlain(ctx, b, chatID, "🗑 Shell closed. Project and working directory cleared — the next command starts fresh in your home directory.")
 }
@@ -731,10 +742,10 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 
 	st.Active = true
 	st.LastCmd = raw
-	h.sessions.Save()
+	h.saveSessions()
 	defer func() {
 		st.Active = false
-		h.sessions.Save()
+		h.saveSessions()
 	}()
 
 	started := time.Now()
@@ -763,7 +774,7 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	if pwd := terminal.ParsePWD(out); pwd != "" {
 		st.Cwd = pwd
 		st.Project = h.projectNameByPath(pwd)
-		h.sessions.Save()
+		h.saveSessions()
 	}
 
 	cleanAll := terminal.CleanShellOutput(out)
