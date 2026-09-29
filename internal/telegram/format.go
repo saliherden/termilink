@@ -137,10 +137,7 @@ func formatRun(cmd string, res terminal.Result) string {
 	b.WriteString(sanitizeCode(payload) + "\n")
 
 	status := "❌ Process exited with code " + fmt.Sprint(res.ExitCode)
-	switch {
-	case res.TimedOut:
-		status = "⏱ Command timed out"
-	case res.ExitCode == 0:
+	if res.ExitCode == 0 {
 		status = "✅ Process exited with code 0"
 	}
 	b.WriteString("\n" + status)
