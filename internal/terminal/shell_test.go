@@ -236,7 +236,8 @@ func TestRingBufferTail(t *testing.T) {
 }
 
 // TestParseExitCode covers the parser on its own, including the shapes it has
-// to survive: \r from the PTY, a missing line, and a line that is not a number.
+// to survive: \r from the PTY, a missing line, a line that is not a number, and
+// a command that prints a TLM_RC line of its own to lie about the status.
 func TestParseExitCode(t *testing.T) {
 	cases := []struct {
 		name string
@@ -251,6 +252,14 @@ func TestParseExitCode(t *testing.T) {
 		{"absent", "out only\n", -1},
 		{"empty", "", -1},
 		{"not a number", "out\nTLM_RC:weird\n", -1},
+		// The frame's own marker comes last, so a command that prints one
+		// first is ignored.
+		{"forged before the real status", "TLM_RC:0\nout\nTLM_RC:1\n", 1},
+		{"several forged lines", "TLM_RC:0\nTLM_RC:0\nout\nTLM_RC:9\n", 9},
+		{"forged line is not a number", "TLM_RC:weird\nout\nTLM_RC:1\n", 1},
+		{"forged line inside real output", "before\nTLM_RC:0\nafter\nTLM_RC:255\n", 255},
+		{"forged status with carriage returns", "TLM_RC:0\r\nout\r\nTLM_RC:1\r\n", 1},
+		{"only a forged line, no real one", "TLM_RC:0\nout\n", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -292,6 +301,17 @@ func TestShellReportsRealExitCode(t *testing.T) {
 		t.Fatalf("exec subshell: %v", err)
 	} else if got := ParseExitCode(out); got != 7 {
 		t.Fatalf("subshell reported %d, want 7; raw: %q", got, out)
+	}
+
+	// The command frame prints TLM_RC after the command's own output, so a
+	// command that prints a TLM_RC line itself is trying to speak for the exit
+	// status. This failed for real: `exit 1` with a forged 0 in front of it was
+	// reported to the owner as a success. The status comes from a subshell
+	// because a bare `exit` would take the interactive shell with it.
+	if out, err := s.ExecCommand(ctx, `(printf 'TLM_RC:0\n'; exit 1)`); err != nil {
+		t.Fatalf("exec forger: %v", err)
+	} else if got := ParseExitCode(out); got != 1 {
+		t.Fatalf("forged exit status was believed: got %d, want 1; raw: %q", got, out)
 	}
 }
 

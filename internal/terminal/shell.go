@@ -548,9 +548,16 @@ func ParsePWD(out []byte) string {
 // that was interrupted before it could report, or a shell that never echoed the
 // line back — which is the same "no status to report" value the one-shot runner
 // uses when a process has no ProcessState.
+//
+// The frame prints TLM_RC *after* the command's own output, so the genuine line
+// is the last one in the frame. Scanning forwards let a command forge its exit
+// status: `(printf 'TLM_RC:0\n'; exit 1)` was reported to the owner as a
+// success. Scanning backwards makes the frame's own marker authoritative, which
+// is the only thing in the output this function has any business believing.
 func ParseExitCode(out []byte) int {
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimRight(line, "\r")
+	lines := strings.Split(string(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(lines[i], "\r")
 		if strings.HasPrefix(line, "TLM_RC:") {
 			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "TLM_RC:"))); err == nil {
 				return n
