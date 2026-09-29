@@ -51,6 +51,11 @@ workspace:
   allowed:
     - /Users/user/projects
 
+# Interactive shell. max_output_bytes bounds two things: the output kept for the
+# /status tail, and the output captured per command. A command that produces
+# more than this keeps its most recent bytes rather than failing — the exit
+# status is still reported exactly. Values below 65536 are raised to 65536,
+# below which a command's own completion markers leave no room for useful output.
 terminal:
   shell: /bin/zsh
   command_timeout: 30m

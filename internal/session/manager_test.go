@@ -59,7 +59,7 @@ func TestRuntimeFieldsNotPersisted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	m := NewManagerWithStateFile(path)
 	s := m.Ensure("chat1")
-	s.Active = true
+	m.SetActive("chat1", true)
 	s.PID = 4242
 	if err := m.Save(); err != nil {
 		t.Fatalf("Save: %v", err)
@@ -70,8 +70,8 @@ func TestRuntimeFieldsNotPersisted(t *testing.T) {
 	if !ok {
 		t.Fatal("state not reloaded")
 	}
-	if got.Active {
-		t.Fatal("Active must not survive a restart (stale lock bug)")
+	if m2.IsActive("chat1") {
+		t.Fatal("the running flag must not survive a restart (stale lock bug)")
 	}
 	if got.PID != 0 {
 		t.Fatalf("PID must not survive a restart, got %d", got.PID)

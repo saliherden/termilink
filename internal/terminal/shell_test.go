@@ -3,6 +3,7 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,56 @@ func TestShellCwdInDir(t *testing.T) {
 	pwd := ParsePWD(out)
 	if pwd != dir {
 		t.Fatalf("cwd = %q, want %q (out: %q)", pwd, dir, out)
+	}
+}
+
+func TestShellCwdIgnoresForgedMarker(t *testing.T) {
+	r := testRunner()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := r.OpenShell(dir, nil)
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// The command prints a forged marker before anything else. The frame emits
+	// the shell's own cwd last, so that is the one the shell is reporting.
+	out, err := s.ExecCommand(ctx, `(printf 'TLM_PWD:/etc\n'; pwd)`)
+	if err != nil {
+		t.Fatalf("pwd: %v", err)
+	}
+	if pwd := ParsePWD(out); pwd != dir {
+		t.Fatalf("forged marker won: cwd = %q, want %q (out: %q)", pwd, dir, out)
+	}
+}
+
+func TestParsePWD(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"plain", "out\nTLM_PWD:/tmp\n", "/tmp"},
+		{"no marker", "out\n", ""},
+		{"empty", "", ""},
+		{"trailing spaces", "out\nTLM_PWD:  /tmp  \n", "/tmp"},
+		{"forged before the real cwd", "TLM_PWD:/etc\nout\nTLM_PWD:/tmp\n", "/tmp"},
+		{"several forged lines", "TLM_PWD:/etc\nTLM_PWD:/var\nout\nTLM_PWD:/tmp\n", "/tmp"},
+		{"forged line after the command's output", "out\nTLM_PWD:/etc\nout\nTLM_PWD:/tmp\n", "/tmp"},
+		{"forged cwd with carriage returns", "TLM_PWD:/etc\r\nout\r\nTLM_PWD:/tmp\r\n", "/tmp"},
+		{"only a forged line", "TLM_PWD:/etc\nout\n", "/etc"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ParsePWD([]byte(tc.out)); got != tc.want {
+				t.Fatalf("ParsePWD(%q) = %q, want %q", tc.out, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -324,5 +375,115 @@ func TestCleanShellOutputStripsExitCodeMarker(t *testing.T) {
 	}
 	if !strings.Contains(clean, "hello") {
 		t.Fatalf("cleaning ate real output: %q", clean)
+	}
+}
+
+// TestInterruptedCommandDoesNotBorrowEarlierOutput is the regression for the
+// per-command capture.
+//
+// partial() used to return the last few kilobytes of the session buffer, which
+// spans every command the shell has ever run. Interrupting a command that had
+// not produced output yet therefore handed the owner the *previous* command's
+// output, and with it the previous command's TLM_RC line — which ParseExitCode
+// then read as the interrupted command's status. A timed-out or stopped
+// command was reported with the exit code of the command before it.
+func TestInterruptedCommandDoesNotBorrowEarlierOutput(t *testing.T) {
+	r := testRunner()
+	s, err := r.OpenShell("", nil)
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if _, err := s.ExecCommand(ctx, `echo EARLIER-MARKER-UNIQUE; (exit 7)`); err != nil {
+		t.Fatalf("first command: %v", err)
+	}
+
+	short, shortCancel := context.WithTimeout(ctx, 700*time.Millisecond)
+	defer shortCancel()
+	out, err := s.ExecCommand(short, `sleep 5`)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context deadline exceeded", err)
+	}
+	if strings.Contains(string(out), "EARLIER-MARKER-UNIQUE") {
+		t.Fatalf("interrupted command borrowed the previous command's output: %q", out)
+	}
+	// The command never reported a status of its own, so there is nothing to
+	// report. -1 is "no status", which is what the owner has to be shown rather
+	// than a stale 0 or 7.
+	if code := ParseExitCode(out); code != -1 {
+		t.Fatalf("interrupted command reported exit code %d, want -1 (no status of its own)", code)
+	}
+}
+
+// TestMaxOutputBytesReachesTheCapture covers terminal.max_output_bytes, which
+// the Runner carried and OpenShell ignored — it built the buffer from the
+// hardcoded DefaultRingBuffer. Raising the limit in the config did nothing, and
+// a command that outgrew 512 KiB lost the front of its own output.
+func TestMaxOutputBytesReachesTheCapture(t *testing.T) {
+	r := NewRunner("/bin/zsh", 30*time.Second, 4<<20)
+	s, err := r.OpenShell("", nil)
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	// ~1.6 MiB: over the 512 KiB default, under the 4 MiB configured here.
+	out, err := s.ExecCommand(ctx,
+		`echo FIRST-LINE-OF-THE-COMMAND; for i in $(seq 1 40000); do echo "line-$i-cccccccccccccccccccccccc"; done; (exit 0)`)
+	if err != nil {
+		t.Fatalf("big command: %v", err)
+	}
+	if len(out) < 1<<20 {
+		t.Fatalf("captured %d bytes, want at least 1 MiB: the configured limit is not reaching the capture", len(out))
+	}
+	if !strings.Contains(string(out), "FIRST-LINE-OF-THE-COMMAND") {
+		t.Fatalf("the start of the output was evicted at a 4 MiB limit")
+	}
+	if code := ParseExitCode(out); code != 0 {
+		t.Fatalf("ParseExitCode = %d, want 0", code)
+	}
+}
+
+// A small configured limit must not break the frame. It costs output, not
+// correctness: the stop marker is written last and always survives.
+func TestSmallMaxOutputStillReportsStatus(t *testing.T) {
+	r := NewRunner("/bin/zsh", 30*time.Second, 1)
+	s, err := r.OpenShell("", nil)
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	out, err := s.ExecCommand(ctx, `for i in $(seq 1 5000); do echo "noise-$i"; done; (exit 3)`)
+	if err != nil {
+		t.Fatalf("command: %v", err)
+	}
+	if code := ParseExitCode(out); code != 3 {
+		t.Fatalf("ParseExitCode = %d, want 3: a tiny capture must still report the real status", code)
+	}
+}
+
+func TestCaptureSizeFloor(t *testing.T) {
+	cases := []struct {
+		configured, want int
+	}{
+		{0, DefaultRingBuffer},
+		{-1, DefaultRingBuffer},
+		{1, MinRingBuffer},
+		{1024, MinRingBuffer},
+		{MinRingBuffer, MinRingBuffer},
+		{4 << 20, 4 << 20},
+	}
+	for _, tc := range cases {
+		if got := captureSize(tc.configured); got != tc.want {
+			t.Fatalf("captureSize(%d) = %d, want %d", tc.configured, got, tc.want)
+		}
 	}
 }

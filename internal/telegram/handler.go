@@ -55,6 +55,9 @@ type Handler struct {
 	shellMu sync.Mutex
 	shells  map[string]*terminal.Shell
 
+	runLockMu sync.Mutex
+	runLocks  map[string]*sync.Mutex
+
 	pendingMu sync.Mutex
 	pending   map[int64]pendingApproval
 
@@ -108,6 +111,7 @@ func NewHandler(opts Options) *Handler {
 		audit:        opts.Audit,
 		agentCfg:     opts.Agent,
 		shells:       map[string]*terminal.Shell{},
+		runLocks:     map[string]*sync.Mutex{},
 		pending:      map[int64]pendingApproval{},
 		filesPending: map[int64]pendingFile{},
 		agents:       map[int64]*agentRun{},
@@ -464,7 +468,7 @@ func (h *Handler) handleInput(ctx context.Context, b *tg.Bot, chatID int64, user
 
 func (h *Handler) handleStop(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State) {
 	shell := h.shellFor(st.ID)
-	if !st.Active || shell == nil || !shell.IsAlive() {
+	if !h.sessions.IsActive(st.ID) || shell == nil || !shell.IsAlive() {
 		h.sendPlain(ctx, b, chatID, "⏹ No command is running.")
 		return
 	}
@@ -495,7 +499,7 @@ func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userI
 		}
 	}
 	h.closeShellFor(st.ID)
-	st.Active = false
+	h.sessions.SetActive(st.ID, false)
 	// /exit is a context reset, not just a process kill. closeShellFor only drops
 	// the PTY from h.shells; the *State survives it, so without this block the
 	// very next plain message calls getShell and reopens a shell in the same
@@ -715,10 +719,20 @@ func (h *Handler) formatSessionStatus(st *session.State) string {
 }
 
 func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, raw string) {
-	if st.Active {
+	// Claim the session atomically rather than reading st.Active: the bot
+	// library runs each update on its own goroutine, so two messages can both
+	// read it as false and then both run a command against the same pty.
+	runLock := h.runLockFor(st.ID)
+	if !runLock.TryLock() {
+		// Audited like any other refusal: the owner is told a command was
+		// rejected, and that rejection has to be in the trail too.
+		e := entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionBusySession, raw)
+		e.Detail = "a command is already running in this session"
+		h.auditEvent(e)
 		h.send(ctx, b, chatID, formatErr("a command is already running in this session; use /stop to interrupt it."))
 		return
 	}
+	defer runLock.Unlock()
 	isOwner := h.authorizer.IsOwner(userID)
 	if reason, ok := h.authorizeCommand(st, isOwner, raw); !ok {
 		e := entryFor(chatID, userID, isOwner, auditActionForDenial(reason), raw)
@@ -740,11 +754,11 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	runCtx, cancel := context.WithTimeout(ctx, h.commandTimeout())
 	defer cancel()
 
-	st.Active = true
+	h.sessions.SetActive(st.ID, true)
 	st.LastCmd = raw
 	h.saveSessions()
 	defer func() {
-		st.Active = false
+		h.sessions.SetActive(st.ID, false)
 		h.saveSessions()
 	}()
 
@@ -931,6 +945,26 @@ func (h *Handler) shellFor(id string) *terminal.Shell {
 	h.shellMu.Lock()
 	defer h.shellMu.Unlock()
 	return h.shells[id]
+}
+
+// runLockFor returns the mutex that serialises command execution for one
+// session. The bot library dispatches every update on its own goroutine, so two
+// commands from the same chat can enter runCommand at the same time; the
+// session's st.Active flag cannot guard that, because reading it and setting it
+// are two separate steps with an audit write between them. The claim has to be
+// atomic instead.
+//
+// /stop and /status deliberately do not take this lock — it is held for the
+// whole command, so taking it there would mean the interrupt could not interrupt.
+func (h *Handler) runLockFor(id string) *sync.Mutex {
+	h.runLockMu.Lock()
+	defer h.runLockMu.Unlock()
+	mu, ok := h.runLocks[id]
+	if !ok {
+		mu = &sync.Mutex{}
+		h.runLocks[id] = mu
+	}
+	return mu
 }
 
 func (h *Handler) closeShellFor(id string) {

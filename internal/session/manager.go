@@ -20,7 +20,6 @@ type State struct {
 	ID      string `json:"id"`
 	Cwd     string `json:"cwd"`
 	Project string `json:"project,omitempty"`
-	Active  bool   `json:"-"`
 	LastCmd string `json:"last_cmd"`
 	PID     int    `json:"-"`
 }
@@ -29,10 +28,35 @@ type Manager struct {
 	mu        sync.RWMutex
 	sessions  map[string]*State
 	stateFile string
+
+	// active holds which sessions are running a command. It lives on the
+	// Manager rather than in State for two reasons. State is copied by value —
+	// List hands out snapshots and Save marshals a copy — and a struct carrying
+	// a mutex cannot be copied. And the bot library dispatches every update on
+	// its own goroutine, so /stop and /status read this flag from a different
+	// goroutine than the one running the command writes it, which is not
+	// something the state file can express at all: Active was never persisted,
+	// so a crashed process always comes back with no command running.
+	activeMu sync.RWMutex
+	active   map[string]bool
+}
+
+// SetActive records whether a command is currently running in the named session.
+func (m *Manager) SetActive(id string, v bool) {
+	m.activeMu.Lock()
+	m.active[id] = v
+	m.activeMu.Unlock()
+}
+
+// IsActive reports whether a command is currently running in the named session.
+func (m *Manager) IsActive(id string) bool {
+	m.activeMu.RLock()
+	defer m.activeMu.RUnlock()
+	return m.active[id]
 }
 
 func NewManager() *Manager {
-	return &Manager{sessions: map[string]*State{}}
+	return &Manager{sessions: map[string]*State{}, active: map[string]bool{}}
 }
 
 func NewManagerWithStateFile(path string) *Manager {

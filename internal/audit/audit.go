@@ -29,6 +29,7 @@ const (
 	ActionCommandResult = "command_result"
 	ActionAccessDenied  = "access_denied"
 	ActionVetBlocked    = "vet_blocked"
+	ActionBusySession   = "busy_session"
 	ActionProjectSwitch = "project_switch"
 	ActionApprovalReq   = "approval_requested"
 	ActionApprovalOK    = "approval_approved"

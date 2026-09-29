@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,6 +20,11 @@ import (
 
 const (
 	DefaultRingBuffer = 512 * 1024
+	// MinRingBuffer is the floor for any capture buffer. A command's output has
+	// to fit its own completion markers and enough context to be worth reading;
+	// below this the frame degenerates to a few hundred bytes. A small
+	// configured value is not unsafe, only useless — see ExecCommand.
+	MinRingBuffer     = 64 * 1024
 	shellMarkerPrefix = "tlmk"
 	shellSentinel     = "TLMP> "
 	shellOpenTimeout  = 8 * time.Second
@@ -41,6 +47,29 @@ func newRingBuffer(max int) *ringBuffer {
 		max = DefaultRingBuffer
 	}
 	return &ringBuffer{max: max}
+}
+
+// captureSize resolves a configured output limit to the size a capture buffer
+// actually gets. The floor is a usefulness policy, not a safety one: a command
+// whose output outgrows its buffer still finishes and still reports its own
+// status, because the stop marker is written last and always survives. Below
+// the floor the result is technically correct and practically unreadable.
+func captureSize(configured int) int {
+	size := newRingBuffer(configured).max
+	if size < MinRingBuffer {
+		return MinRingBuffer
+	}
+	return size
+}
+
+// Contains reports whether the buffer holds needle. ExecCommand's poll asks
+// this every 50ms, and Bytes would copy the whole buffer to answer it — which
+// is a megabyte twenty times a second for a command that has produced a
+// megabyte of output.
+func (b *ringBuffer) Contains(needle []byte) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return bytes.Contains(b.data, needle)
 }
 
 func (b *ringBuffer) Write(p []byte) (int, error) {
@@ -84,6 +113,7 @@ type Shell struct {
 	cmd     *exec.Cmd
 	master  io.ReadWriteCloser
 	buf     *ringBuffer
+	maxOut  int
 	started time.Time
 	pid     int
 	zdir    string
@@ -92,6 +122,11 @@ type Shell struct {
 	closed  bool
 	done    chan struct{}
 	curStop chan struct{}
+	// capture holds the output of the command currently running, and is nil
+	// otherwise. It is a separate buffer from buf on purpose: buf spans the
+	// whole session and rolls over, so a single command that outgrows it cannot
+	// be told apart from the ones before it.
+	capture *ringBuffer
 	stopped atomic.Bool
 }
 
@@ -155,7 +190,8 @@ func (r *Runner) OpenShell(dir string, env []string) (*Shell, error) {
 	s := &Shell{
 		cmd:     cmd,
 		master:  master,
-		buf:     newRingBuffer(DefaultRingBuffer),
+		buf:     newRingBuffer(captureSize(r.maxOutput)),
+		maxOut:  r.maxOutput,
 		started: time.Now(),
 		pid:     pid,
 		zdir:    zdir,
@@ -279,11 +315,23 @@ func (s *Shell) pump() {
 		n, err := s.master.Read(buf)
 		if n > 0 {
 			_, _ = s.buf.Write(buf[:n])
+			if c := s.captureBuffer(); c != nil {
+				_, _ = c.Write(buf[:n])
+			}
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+// captureBuffer returns the buffer collecting the running command's output, or
+// nil when nothing is running. The nil check is the normal case: pump reads
+// from the pty continuously, including between commands.
+func (s *Shell) captureBuffer() *ringBuffer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.capture
 }
 
 func (s *Shell) markDone() {
@@ -459,12 +507,19 @@ func (s *Shell) ExecCommand(ctx context.Context, command string) ([]byte, error)
 	// arguments are built, which is still the previous command's status, so the
 	// printf itself cannot overwrite the value it is printing.
 	frame := fmt.Sprintf("printf '\\n%s'; %s; printf 'TLM_RC:%%s\\n' \"$?\"; printf 'TLM_PWD:%%s\n' \"$PWD\"; printf '%s'\n", startTok, command, stopTok)
-	if err := s.writeString(frame); err != nil {
-		return nil, err
-	}
-	startLen := len(s.Output())
 
+	// Install the per-command capture before the frame is written, so the
+	// shell's echo of the start token is part of it. From here on this is the
+	// only place the command's output is looked for.
+	//
+	// A buffer smaller than the command's output is not a failure here. The
+	// stop token is written last, so it always survives, and sliceFrame then
+	// falls back to the start of what is left — the tail of *this* command,
+	// with no way to mistake it for an earlier one's output. That is why the
+	// configured minimum is a matter of usefulness rather than correctness.
+	capture := newRingBuffer(captureSize(s.maxOut))
 	s.mu.Lock()
+	s.capture = capture
 	s.curStop = make(chan struct{})
 	stopCh := s.curStop
 	s.mu.Unlock()
@@ -472,22 +527,26 @@ func (s *Shell) ExecCommand(ctx context.Context, command string) ([]byte, error)
 	defer func() {
 		s.stopped.Store(false)
 		s.mu.Lock()
+		s.capture = nil
 		s.curStop = nil
 		s.mu.Unlock()
 	}()
 
+	if err := s.writeString(frame); err != nil {
+		return nil, err
+	}
+
 	// cmdFinished returns the output the command actually produced, or nil while
 	// the command is still running.
-	cmdFinished := func(data []byte) []byte {
-		return sliceFrame(data, startTok, stopTok)
+	cmdFinished := func() []byte {
+		if !capture.Contains([]byte(stopTok)) {
+			return nil
+		}
+		return sliceFrame(capture.Bytes(), startTok, stopTok)
 	}
 
 	partial := func() []byte {
-		out := s.Output()
-		if startLen < len(out) {
-			out = out[startLen:]
-		}
-		return lastBytes(out, interruptTailBytes)
+		return lastBytes(capture.Bytes(), interruptTailBytes)
 	}
 
 	ticker := time.NewTicker(50 * time.Millisecond)
@@ -498,7 +557,7 @@ func (s *Shell) ExecCommand(ctx context.Context, command string) ([]byte, error)
 		case <-ctx.Done():
 			s.interruptNow()
 			time.Sleep(shellEOLWait)
-			if out := cmdFinished(s.Output()); out != nil {
+			if out := cmdFinished(); out != nil {
 				return out, ctx.Err()
 			}
 			return partial(), ctx.Err()
@@ -509,7 +568,7 @@ func (s *Shell) ExecCommand(ctx context.Context, command string) ([]byte, error)
 			if s.stopped.Load() {
 				return partial(), ErrInterrupted
 			}
-			out := cmdFinished(s.Output())
+			out := cmdFinished()
 			if out != nil {
 				return out, nil
 			}
@@ -531,10 +590,15 @@ func lastBytes(data []byte, n int) []byte {
 
 var ErrInterrupted = errors.New("command interrupted")
 
-// ParsePWD extracts the trailing "TLM_PWD:..." line from command output.
+// ParsePWD extracts the trailing "TLM_PWD:..." line from command output. It
+// scans backwards and takes the last such line, because the frame emits the
+// shell's own cwd after the command has run — anything the command printed came
+// earlier in the byte stream, and a command must not be able to report a
+// directory the shell is not actually in.
 func ParsePWD(out []byte) string {
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimRight(line, "\r")
+	lines := strings.Split(string(out), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := strings.TrimRight(lines[i], "\r")
 		if strings.HasPrefix(line, "TLM_PWD:") {
 			return strings.TrimSpace(strings.TrimPrefix(line, "TLM_PWD:"))
 		}
