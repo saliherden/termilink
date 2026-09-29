@@ -455,7 +455,10 @@ func (s *Shell) ExecCommand(ctx context.Context, command string) ([]byte, error)
 	marker := nextShellMarker()
 	startTok := "S_" + marker + "#"
 	stopTok := "E_" + marker + "#"
-	frame := fmt.Sprintf("printf '\\n%s'; %s; printf 'TLM_PWD:%%s\n' \"$PWD\"; printf '%s'\n", startTok, command, stopTok)
+	// TLM_RC captures the command's own status: $? is expanded while printf's
+	// arguments are built, which is still the previous command's status, so the
+	// printf itself cannot overwrite the value it is printing.
+	frame := fmt.Sprintf("printf '\\n%s'; %s; printf 'TLM_RC:%%s\\n' \"$?\"; printf 'TLM_PWD:%%s\n' \"$PWD\"; printf '%s'\n", startTok, command, stopTok)
 	if err := s.writeString(frame); err != nil {
 		return nil, err
 	}
@@ -537,6 +540,25 @@ func ParsePWD(out []byte) string {
 		}
 	}
 	return ""
+}
+
+// ParseExitCode extracts the "TLM_RC:..." line the command frame emits, which
+// carries the shell's own exit status for the command that just ran. It returns
+// -1 when the line is absent — an output older than this frame format, a command
+// that was interrupted before it could report, or a shell that never echoed the
+// line back — which is the same "no status to report" value the one-shot runner
+// uses when a process has no ProcessState.
+func ParseExitCode(out []byte) int {
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "TLM_RC:") {
+			if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(line, "TLM_RC:"))); err == nil {
+				return n
+			}
+			return -1
+		}
+	}
+	return -1
 }
 
 // CwdOfShell reports the current working directory of the interactive shell.

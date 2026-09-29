@@ -652,8 +652,10 @@ func (h *Handler) handleDocument(ctx context.Context, b *tg.Bot, chatID int64, u
 }
 
 // sendFullOutput delivers the full command output as a document when it is too
-// long for a single message, preceded by a short preview message.
-func (h *Handler) sendFullOutput(ctx context.Context, b *tg.Bot, chatID int64, out []byte, maxMsgLen int) {
+// long for a single message, preceded by a short preview message. exitCode is
+// the real exit status of the command: the preview is the only place the owner
+// gets to see it, since the document itself is the raw text.
+func (h *Handler) sendFullOutput(ctx context.Context, b *tg.Bot, chatID int64, out []byte, maxMsgLen int, exitCode int) {
 	lim := h.uploadLimit()
 	data := out
 	if int64(len(data)) > lim {
@@ -661,7 +663,7 @@ func (h *Handler) sendFullOutput(ctx context.Context, b *tg.Bot, chatID int64, o
 	}
 	preview := terminal.TruncateOutput(out, maxMsgLen)
 	h.sendPlain(ctx, b, chatID, "🔎 Output is long ("+humanSize(int64(len(out)))+"). Sending a preview + the full text as an `output.txt` document:")
-	h.send(ctx, b, chatID, formatRun("output.txt (full output)", terminal.Result{Output: preview, ExitCode: 0}))
+	h.send(ctx, b, chatID, formatRun("output.txt (full output)", terminal.Result{Output: preview, ExitCode: exitCode}))
 	_, err := b.SendDocument(ctx, &tg.SendDocumentParams{
 		ChatID:   chatID,
 		Document: &models.InputFileUpload{Filename: "output.txt", Data: bytes.NewReader(data)},
@@ -736,12 +738,17 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	}()
 
 	started := time.Now()
-	res, err := shell.ExecCommand(runCtx, command)
+	out, err := shell.ExecCommand(runCtx, command)
 	durMS := time.Since(started).Milliseconds()
+	// The PTY path has no Go error for a command that ran and exited non-zero —
+	// the shell reports the status, not the transport — so the frame's TLM_RC
+	// line is the only signal, and err would call every failure a success in
+	// both the audit trail and the message the owner reads.
+	exitCode := terminal.ParseExitCode(out)
 
 	resEntry := entryFor(chatID, userID, isOwner, audit.ActionCommandResult, raw)
 	resEntry.DurMS = durMS
-	resEntry.OK = audit.Bool(err == nil)
+	resEntry.OK = audit.Bool(exitCode == 0)
 	switch {
 	case err == nil:
 	case errors.Is(err, context.DeadlineExceeded):
@@ -753,13 +760,13 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	}
 	h.auditEvent(resEntry)
 
-	if pwd := terminal.ParsePWD(res); pwd != "" {
+	if pwd := terminal.ParsePWD(out); pwd != "" {
 		st.Cwd = pwd
 		st.Project = h.projectNameByPath(pwd)
 		h.sessions.Save()
 	}
 
-	cleanAll := terminal.CleanShellOutput(res)
+	cleanAll := terminal.CleanShellOutput(out)
 	display := terminal.TruncateOutput(cleanAll, h.maxMsgLen)
 
 	switch {
@@ -783,14 +790,14 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	}
 
 	if len(cleanAll) > h.maxMsgLen {
-		h.sendFullOutput(ctx, b, chatID, cleanAll, h.maxMsgLen)
+		h.sendFullOutput(ctx, b, chatID, cleanAll, h.maxMsgLen, exitCode)
 		return
 	}
 
 	_, _ = b.SendChatAction(ctx, &tg.SendChatActionParams{ChatID: chatID, Action: models.ChatActionTyping})
 	h.send(ctx, b, chatID, formatRun(raw, terminal.Result{
 		Output:   display,
-		ExitCode: 0,
+		ExitCode: exitCode,
 	}))
 }
 

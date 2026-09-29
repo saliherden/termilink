@@ -24,6 +24,9 @@ func CleanShellOutput(out []byte) []byte {
 		if strings.HasPrefix(line, "TLM_PWD:") {
 			continue
 		}
+		if strings.HasPrefix(line, "TLM_RC:") {
+			continue
+		}
 		if strings.HasPrefix(line, "S_"+shellMarkerPrefix) ||
 			strings.HasPrefix(line, "E_"+shellMarkerPrefix) ||
 			strings.HasPrefix(line, "REQ_"+shellMarkerPrefix) {

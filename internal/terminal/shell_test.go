@@ -234,3 +234,75 @@ func TestRingBufferTail(t *testing.T) {
 		t.Fatalf("tail mismatch: %q", got)
 	}
 }
+
+// TestParseExitCode covers the parser on its own, including the shapes it has
+// to survive: \r from the PTY, a missing line, and a line that is not a number.
+func TestParseExitCode(t *testing.T) {
+	cases := []struct {
+		name string
+		out  string
+		want int
+	}{
+		{"zero", "out\nTLM_RC:0\n", 0},
+		{"nonzero", "out\nTLM_RC:1\n", 1},
+		{"signal", "out\nTLM_RC:137\n", 137},
+		{"carriage return", "out\r\nTLM_RC:3\r\n", 3},
+		{"padded", "out\nTLM_RC:  42  \n", 42},
+		{"absent", "out only\n", -1},
+		{"empty", "", -1},
+		{"not a number", "out\nTLM_RC:weird\n", -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ParseExitCode([]byte(tc.out)); got != tc.want {
+				t.Fatalf("ParseExitCode(%q) = %d, want %d", tc.out, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestShellReportsRealExitCode is the terminal-side half: the status has to
+// survive the round trip through a real interactive zsh, not just the parser.
+func TestShellReportsRealExitCode(t *testing.T) {
+	r := testRunner()
+	s, err := r.OpenShell("", nil)
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	defer s.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	if out, err := s.ExecCommand(ctx, "false"); err != nil {
+		t.Fatalf("exec false: %v", err)
+	} else if got := ParseExitCode(out); got != 1 {
+		t.Fatalf("false reported %d, want 1; raw: %q", got, out)
+	}
+
+	if out, err := s.ExecCommand(ctx, "true"); err != nil {
+		t.Fatalf("exec true: %v", err)
+	} else if got := ParseExitCode(out); got != 0 {
+		t.Fatalf("true reported %d, want 0; raw: %q", got, out)
+	}
+
+	// A bare `exit` would end the interactive shell itself, so the status comes
+	// from a subshell instead.
+	if out, err := s.ExecCommand(ctx, "(exit 7)"); err != nil {
+		t.Fatalf("exec subshell: %v", err)
+	} else if got := ParseExitCode(out); got != 7 {
+		t.Fatalf("subshell reported %d, want 7; raw: %q", got, out)
+	}
+}
+
+// The marker is plumbing, not output: the owner must never see it.
+func TestCleanShellOutputStripsExitCodeMarker(t *testing.T) {
+	raw := []byte("hello\nTLM_RC:1\nTLM_PWD:/tmp\n")
+	clean := string(CleanShellOutput(raw))
+	if strings.Contains(clean, "TLM_RC:") || strings.Contains(clean, "TLM_PWD:") {
+		t.Fatalf("markers survived cleaning: %q", clean)
+	}
+	if !strings.Contains(clean, "hello") {
+		t.Fatalf("cleaning ate real output: %q", clean)
+	}
+}
