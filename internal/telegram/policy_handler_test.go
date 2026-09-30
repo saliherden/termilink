@@ -50,7 +50,7 @@ func TestWorkspaceVetDisabledWhenEmpty(t *testing.T) {
 func TestAuthorizeCommandWorkerMatrix(t *testing.T) {
 	p, _ := security.NewPolicy("", nil, []string{"/Users/s/projects"})
 	h := NewHandler(Options{Policy: p})
-	st := &session.State{ID: "chat", Project: "app", Cwd: "/Users/s/projects/app"}
+	st := session.State{ID: "chat", Project: "app", Cwd: "/Users/s/projects/app"}
 
 	if _, ok := h.authorizeCommand(st, true, "cd /tmp && cat /etc/passwd"); !ok {
 		t.Fatal("owner must bypass everything")
@@ -58,7 +58,7 @@ func TestAuthorizeCommandWorkerMatrix(t *testing.T) {
 	if _, ok := h.authorizeCommand(st, false, "cd /tmp"); ok {
 		t.Fatal("worker cd must be blocked")
 	}
-	noProj := &session.State{ID: "chat"}
+	noProj := session.State{ID: "chat"}
 	if _, ok := h.authorizeCommand(noProj, false, "ls"); ok {
 		t.Fatal("worker without project must be blocked")
 	}

@@ -8,7 +8,7 @@ import (
 
 func TestAuthorizeCommandOwner(t *testing.T) {
 	h := &Handler{}
-	st := &session.State{}
+	st := session.State{}
 	reason, ok := h.authorizeCommand(st, true, "cd /etc")
 	if !ok {
 		t.Fatalf("owner cd should be allowed, got reason %q", reason)
@@ -23,15 +23,15 @@ func TestAuthorizeCommandWorker(t *testing.T) {
 	h := &Handler{}
 	cases := []struct {
 		name string
-		st   *session.State
+		st   session.State
 		raw  string
 		ok   bool
 	}{
-		{"cd blocked", &session.State{Project: "p"}, "cd /etc", false},
-		{"bare cd blocked", &session.State{Project: "p"}, "cd", false},
-		{"no project blocked", &session.State{}, "ls", false},
-		{"no project cd blocked", &session.State{}, "cd /tmp", false},
-		{"with project allowed", &session.State{Project: "p"}, "make build", true},
+		{"cd blocked", session.State{Project: "p"}, "cd /etc", false},
+		{"bare cd blocked", session.State{Project: "p"}, "cd", false},
+		{"no project blocked", session.State{}, "ls", false},
+		{"no project cd blocked", session.State{}, "cd /tmp", false},
+		{"with project allowed", session.State{Project: "p"}, "make build", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

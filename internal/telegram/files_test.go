@@ -46,7 +46,7 @@ func TestGetPathOrFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 	h := NewHandler(Options{})
-	st := &session.State{Cwd: cwd}
+	st := session.State{Cwd: cwd}
 
 	for _, p := range []string{"/abs/path", "~/rel"} {
 		if !h.getPathOrFilter(st, p) {
@@ -79,19 +79,19 @@ func TestResolveTargetPath(t *testing.T) {
 	t.Setenv("HOME", "/home/test")
 	h := NewHandler(Options{})
 
-	abs, err := h.resolveTargetPath(&session.State{}, "/etc/hosts")
+	abs, err := h.resolveTargetPath(session.State{}, "/etc/hosts")
 	if err != nil || abs != "/etc/hosts" {
 		t.Fatalf("abs path: %q, %v", abs, err)
 	}
-	home, _ := h.resolveTargetPath(&session.State{}, "~/x/y")
+	home, _ := h.resolveTargetPath(session.State{}, "~/x/y")
 	if home != "/home/test/x/y" {
 		t.Fatalf("~ path: %q", home)
 	}
-	doh, _ := h.resolveTargetPath(&session.State{}, "$HOME/z")
+	doh, _ := h.resolveTargetPath(session.State{}, "$HOME/z")
 	if doh != "/home/test/z" {
 		t.Fatalf("$HOME path: %q", doh)
 	}
-	st := &session.State{Cwd: "/proj"}
+	st := session.State{Cwd: "/proj"}
 	rel, _ := h.resolveTargetPath(st, "docs/readme.md")
 	if rel != "/proj/docs/readme.md" {
 		t.Fatalf("relative path: %q", rel)

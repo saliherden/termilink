@@ -149,15 +149,30 @@ func (h *Handler) auditEvent(e audit.Entry) {
 	h.audit.Audit(e)
 }
 
-// saveSessions persists session state and reports a failure instead of
-// dropping it: a lost write silently resets the session on the next restart,
-// while the user still got a "done" reply and the audit log still reads "ok".
-// h.log is nil in tests that construct a Handler without a Logger, so the
-// warning is guarded the same way auditEvent guards a nil audit.
-func (h *Handler) saveSessions() {
-	if err := h.sessions.Save(); err != nil && h.log != nil {
+// mutateSession is the only way session state is written. The change and the
+// save happen inside one critical section on the Manager, so a reader can never
+// observe the fields half-updated and the file can never lag the memory. A
+// failed write is logged rather than dropped: a lost write silently resets the
+// session on the next restart, while the user still got a "done" reply and the
+// audit log still reads "ok". h.log is nil in tests that construct a Handler
+// without a Logger, so the warning is guarded the way auditEvent guards a nil
+// audit.
+func (h *Handler) mutateSession(id string, fn func(*session.State)) {
+	if err := h.sessions.Mutate(id, fn); err != nil && h.log != nil {
 		h.log.Warn("could not persist session state", "err", err)
 	}
+}
+
+// ensureSession returns the state for a chat, creating it on first contact. A
+// session that could not be persisted is still served — losing the binding
+// across a restart is recoverable, refusing the message is not — so the failure
+// is logged and the returned state is used as-is.
+func (h *Handler) ensureSession(id string) session.State {
+	st, err := h.sessions.Ensure(id)
+	if err != nil && h.log != nil {
+		h.log.Warn("could not persist new session", "id", id, "err", err)
+	}
+	return st
 }
 
 // entryFor builds a redacted audit entry from chat/user context.
@@ -240,7 +255,7 @@ func (h *Handler) recoverUpdate(ctx context.Context, b *tg.Bot, chatID, userID *
 }
 
 func (h *Handler) handle(ctx context.Context, b *tg.Bot, chatID int64, userID int64, text string) {
-	st := h.sessions.Ensure(strconv.FormatInt(chatID, 10))
+	st := h.ensureSession(strconv.FormatInt(chatID, 10))
 
 	if strings.HasPrefix(text, "/") {
 		h.handleCommand(ctx, b, chatID, userID, st, text)
@@ -271,7 +286,7 @@ func (h *Handler) handle(ctx context.Context, b *tg.Bot, chatID int64, userID in
 	h.maybeApproveAndRun(ctx, b, chatID, userID, st, text)
 }
 
-func (h *Handler) maybeApproveAndRun(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, text string) {
+func (h *Handler) maybeApproveAndRun(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, text string) {
 	if h.policy != nil && h.policy.NeedsApproval(h.authorizer.IsOwner(userID), text) {
 		h.pendingMu.Lock()
 		h.pending[chatID] = pendingApproval{userID: userID, raw: text, expires: time.Now().Add(approvalTTL)}
@@ -297,7 +312,7 @@ func (h *Handler) pendingApprovalFor(chatID int64) *pendingApproval {
 	return &req
 }
 
-func (h *Handler) resolveApproval(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, text string) {
+func (h *Handler) resolveApproval(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, text string) {
 	h.pendingMu.Lock()
 	req, ok := h.pending[chatID]
 	if ok {
@@ -350,7 +365,7 @@ func approvalVerdict(text string) approvalAnswer {
 	return answerUnknown
 }
 
-func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, text string) {
+func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, text string) {
 	fields := strings.Fields(text)
 	name := strings.TrimPrefix(fields[0], "/")
 	if i := strings.Index(name, "@"); i >= 0 {
@@ -399,7 +414,7 @@ func (h *Handler) handleCommand(ctx context.Context, b *tg.Bot, chatID int64, us
 	}
 }
 
-func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, args []string) {
+func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, args []string) {
 	if len(args) == 0 {
 		h.send(ctx, b, chatID, formatProjects(h.projectNames()))
 		return
@@ -420,9 +435,10 @@ func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, us
 		return
 	}
 	h.closeShellFor(st.ID)
-	st.Cwd = p.Path
-	st.Project = name
-	h.saveSessions()
+	h.mutateSession(st.ID, func(s *session.State) {
+		s.Cwd = p.Path
+		s.Project = name
+	})
 
 	e := entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionProjectSwitch, name)
 	e.Detail = p.Path
@@ -435,7 +451,7 @@ func (h *Handler) handleProject(ctx context.Context, b *tg.Bot, chatID int64, us
 	h.send(ctx, b, chatID, formatProjectHome(name, p.Path, cmdNames))
 }
 
-func (h *Handler) handleInput(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, args []string) {
+func (h *Handler) handleInput(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, args []string) {
 	shell := h.shellFor(st.ID)
 	if shell == nil || !shell.IsAlive() {
 		h.send(ctx, b, chatID, formatErr("no active shell; send a command first."))
@@ -466,7 +482,7 @@ func (h *Handler) handleInput(ctx context.Context, b *tg.Bot, chatID int64, user
 	h.sendPlain(ctx, b, chatID, "📥 Input sent.")
 }
 
-func (h *Handler) handleStop(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State) {
+func (h *Handler) handleStop(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State) {
 	shell := h.shellFor(st.ID)
 	if !h.sessions.IsActive(st.ID) || shell == nil || !shell.IsAlive() {
 		h.sendPlain(ctx, b, chatID, "⏹ No command is running.")
@@ -479,7 +495,7 @@ func (h *Handler) handleStop(ctx context.Context, b *tg.Bot, chatID int64, userI
 // handleExit is the "close everything" command. With an agent running it must
 // also tear the agent down, because the agent holds its own PTY that /exit
 // cannot reach on its own.
-func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State) {
+func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State) {
 	// Agent first. Its session holds work the owner would lose silently, and its
 	// final screen has to be captured while the TUI is still alive; closing the
 	// shell first interrupts the machine underneath it and the last screen comes
@@ -511,14 +527,15 @@ func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userI
 	// Cwd is set explicitly rather than cleared: effectiveCwd falls back to the
 	// gateway process's own working directory, which is wherever the bot happened
 	// to be started, not a predictable "home".
-	if home, err := os.UserHomeDir(); err == nil {
-		st.Cwd = home
-	} else {
-		st.Cwd = "$HOME"
+	home, herr := os.UserHomeDir()
+	if herr != nil {
+		home = "$HOME"
 	}
-	st.Project = ""
-	st.LastCmd = ""
-	h.saveSessions()
+	h.mutateSession(st.ID, func(s *session.State) {
+		s.Cwd = home
+		s.Project = ""
+		s.LastCmd = ""
+	})
 	h.auditEvent(entryFor(chatID, userID, h.authorizer.IsOwner(userID), audit.ActionExit, "/exit"))
 	h.sendPlain(ctx, b, chatID, "🗑 Shell closed. Project and working directory cleared — the next command starts fresh in your home directory.")
 }
@@ -526,7 +543,7 @@ func (h *Handler) handleExit(ctx context.Context, b *tg.Bot, chatID int64, userI
 // handleGet delivers a single file (`get <path>`) or fetches project artifacts:
 // `get` sends every artifact, `get <filter>` only the ones whose name/relative
 // path contains filter (e.g. "debug").
-func (h *Handler) handleGet(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, args []string) {
+func (h *Handler) handleGet(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, args []string) {
 	isOwner := h.authorizer.IsOwner(userID)
 	target := strings.Join(args, " ")
 
@@ -605,7 +622,7 @@ func displayArtifactQuery(filter string, patterns []string) string {
 
 // deliveryAuth gates file delivery for workers: project selection plus the
 // workspace vet applied to the resolved path. The owner bypasses everything.
-func (h *Handler) deliveryAuth(st *session.State, isOwner bool, path string) (string, bool) {
+func (h *Handler) deliveryAuth(st session.State, isOwner bool, path string) (string, bool) {
 	if isOwner {
 		return "", true
 	}
@@ -621,7 +638,7 @@ func (h *Handler) deliveryAuth(st *session.State, isOwner bool, path string) (st
 // handleDocument auto-saves any sent document into the session working
 // directory (never overwriting), subject to the upload size cap.
 func (h *Handler) handleDocument(ctx context.Context, b *tg.Bot, chatID int64, userID int64, doc *models.Document) {
-	st := h.sessions.Ensure(strconv.FormatInt(chatID, 10))
+	st := h.ensureSession(strconv.FormatInt(chatID, 10))
 	isOwner := h.authorizer.IsOwner(userID)
 
 	if doc.FileSize > h.uploadLimit() {
@@ -688,7 +705,7 @@ func (h *Handler) sendFullOutput(ctx context.Context, b *tg.Bot, chatID int64, o
 	}
 }
 
-func (h *Handler) formatSessionStatus(st *session.State) string {
+func (h *Handler) formatSessionStatus(st session.State) string {
 	var extra strings.Builder
 	if id, err := strconv.ParseInt(st.ID, 10, 64); err == nil {
 		if run := h.agentSessionFor(id); run != nil && run.sess.IsAlive() {
@@ -718,7 +735,7 @@ func (h *Handler) formatSessionStatus(st *session.State) string {
 	return formatStatus(st.Project, h.effectiveCwd(st), st.LastCmd) + extra.String()
 }
 
-func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, raw string) {
+func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, raw string) {
 	// Claim the session atomically rather than reading st.Active: the bot
 	// library runs each update on its own goroutine, so two messages can both
 	// read it as false and then both run a command against the same pty.
@@ -755,12 +772,8 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	defer cancel()
 
 	h.sessions.SetActive(st.ID, true)
-	st.LastCmd = raw
-	h.saveSessions()
-	defer func() {
-		h.sessions.SetActive(st.ID, false)
-		h.saveSessions()
-	}()
+	h.mutateSession(st.ID, func(s *session.State) { s.LastCmd = raw })
+	defer h.sessions.SetActive(st.ID, false)
 
 	started := time.Now()
 	out, err := shell.ExecCommand(runCtx, command)
@@ -786,9 +799,11 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	h.auditEvent(resEntry)
 
 	if pwd := terminal.ParsePWD(out); pwd != "" {
-		st.Cwd = pwd
-		st.Project = h.projectNameByPath(pwd)
-		h.saveSessions()
+		project := h.projectNameByPath(pwd)
+		h.mutateSession(st.ID, func(s *session.State) {
+			s.Cwd = pwd
+			s.Project = project
+		})
 	}
 
 	cleanAll := terminal.CleanShellOutput(out)
@@ -826,7 +841,7 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	}))
 }
 
-func (h *Handler) authorizeCommand(st *session.State, isOwner bool, raw string) (string, bool) {
+func (h *Handler) authorizeCommand(st session.State, isOwner bool, raw string) (string, bool) {
 	if isOwner {
 		return "", true
 	}
@@ -893,7 +908,7 @@ func isCdCommand(raw string) bool {
 	return raw == "cd" || strings.HasPrefix(raw, "cd ")
 }
 
-func (h *Handler) effectiveCwd(st *session.State) string {
+func (h *Handler) effectiveCwd(st session.State) string {
 	if st.Cwd != "" {
 		return st.Cwd
 	}
@@ -903,7 +918,7 @@ func (h *Handler) effectiveCwd(st *session.State) string {
 	return ""
 }
 
-func (h *Handler) getShell(st *session.State) (*terminal.Shell, error) {
+func (h *Handler) getShell(st session.State) (*terminal.Shell, error) {
 	h.shellMu.Lock()
 	defer h.shellMu.Unlock()
 	if s, ok := h.shells[st.ID]; ok {
@@ -928,7 +943,7 @@ func (h *Handler) getShell(st *session.State) (*terminal.Shell, error) {
 // TERMILINK_PROJECT plus the project's env block. The base environment is not
 // repeated here — the terminal runner prepends os.Environ() to whatever this
 // returns.
-func (h *Handler) projectEnv(st *session.State) []string {
+func (h *Handler) projectEnv(st session.State) []string {
 	env := []string{}
 	if st.Project != "" {
 		env = append(env, "TERMILINK_PROJECT="+st.Project)
@@ -995,7 +1010,7 @@ func (h *Handler) Close() {
 	}
 }
 
-func (h *Handler) resolve(st *session.State, raw string) (string, bool) {
+func (h *Handler) resolve(st session.State, raw string) (string, bool) {
 	if isCdCommand(raw) {
 		target := strings.TrimSpace(strings.TrimPrefix(raw, "cd"))
 		if target == "" {

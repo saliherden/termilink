@@ -601,7 +601,7 @@ make test   # CI additionally runs the race detector
 | `internal/security` | roles, dangerous-command vet, workspace policy |
 | `internal/audit` | append-only JSONL audit log |
 
-Two decisions are worth knowing before reading the code. **The command frame:**
+Three decisions are worth knowing before reading the code. **The command frame:**
 every command runs in the persistent shell wrapped in `crypto/rand` markers, and
 the shell appends its own exit status and cwd inside them —
 
@@ -614,7 +614,12 @@ speak for the shell's own status or directory. **One command per session, at a
 time:** the Telegram library dispatches each update on its own goroutine, so the
 busy state is a per-session `TryLock` rather than a flag read and set twenty lines
 apart — and `/stop` and `/status` never take it, because an interrupt that waits
-behind the command it exists to interrupt is not an interrupt.
+behind the command it exists to interrupt is not an interrupt. **Session state is
+passed by value.** The Manager hands out copies (`Snapshot`, `Ensure`) and takes
+writes as a closure (`Mutate`) that applies the change and persists it inside one
+critical section, so the goroutine running a command and the one answering
+`/status` cannot be looking at the same struct — and `/status` cannot pair a
+project with a directory that belongs to a different one.
 
 ## Troubleshooting
 
@@ -658,11 +663,6 @@ on a date.
   branch ruleset gates anything.
 - **Bot token rotation** — the token in use was shared in chat during
   development. Deferred until the deployment is settled, but a real exposure.
-- **Session state race** — `st.Cwd` / `st.Project` / `st.LastCmd` are written by
-  the command goroutine and read by `/status` from another: the same exposure the
-  command-busy flag had, across 38 sites in three packages.
-- **Silent session-write failure** — a failed write on first creation is
-  discarded, so state can be lost without any message.
 - **Coverage reporting in CI** — not wired; `internal/telegram` and
   `internal/agent` are the weakest packages.
 

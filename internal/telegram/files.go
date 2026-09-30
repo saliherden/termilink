@@ -56,7 +56,7 @@ func humanSize(n int64) string {
 // leading . that resolves to an existing file mean a path; a plain keyword
 // (no separator) is a filter; a slash-separated argument is a path only when
 // it resolves to an existing file.
-func (h *Handler) getPathOrFilter(st *session.State, target string) bool {
+func (h *Handler) getPathOrFilter(st session.State, target string) bool {
 	if strings.HasPrefix(target, "/") || strings.HasPrefix(target, "~") || strings.HasPrefix(target, "$") {
 		return true
 	}
@@ -81,7 +81,7 @@ func (h *Handler) getPathOrFilter(st *session.State, target string) bool {
 
 // resolveTargetPath expands ~ / $HOME and absolute paths, and resolves relative
 // paths against the current working directory.
-func (h *Handler) resolveTargetPath(st *session.State, raw string) (string, error) {
+func (h *Handler) resolveTargetPath(st session.State, raw string) (string, error) {
 	tok := strings.TrimSpace(raw)
 	if tok == "" {
 		return "", errors.New("empty path")

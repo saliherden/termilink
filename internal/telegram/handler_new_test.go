@@ -103,13 +103,13 @@ func TestNewHandlerFallsBackToSessionManager(t *testing.T) {
 	if h.sessions == nil {
 		t.Fatal("NewHandler left sessions nil")
 	}
-	if _, ok := h.sessions.Get("1"); ok {
+	if _, ok := h.sessions.Snapshot("1"); ok {
 		t.Fatal("a brand new chat already has a state")
 	}
-	if h.sessions.Ensure("1") == nil {
-		t.Fatal("fallback session manager cannot create a state")
+	if _, err := h.sessions.Ensure("1"); err != nil {
+		t.Fatalf("fallback session manager cannot create a state: %v", err)
 	}
-	if _, ok := h.sessions.Get("1"); !ok {
+	if _, ok := h.sessions.Snapshot("1"); !ok {
 		t.Fatal("state created by the fallback manager is not readable")
 	}
 	if _, err := filepath.Glob(filepath.Join(dir, ".termilink", "*")); err != nil {

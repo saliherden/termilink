@@ -125,7 +125,7 @@ func (r *agentRun) claim() bool {
 }
 
 // handleAgentCommand dispatches /agent <sub>.
-func (h *Handler) handleAgentCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, args []string) {
+func (h *Handler) handleAgentCommand(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, args []string) {
 	if len(args) == 0 || args[0] == "status" {
 		h.handleAgentStatus(ctx, b, chatID)
 		return
@@ -151,7 +151,7 @@ func (h *Handler) handleAgentCommand(ctx context.Context, b *tg.Bot, chatID int6
 // handleAgentStart opens the interactive agent CLI in the selected project
 // directory. Only the owner can start it, so the TUI (which can run arbitrary
 // code) stays under the owner's sole control.
-func (h *Handler) handleAgentStart(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st *session.State, prompt string) {
+func (h *Handler) handleAgentStart(ctx context.Context, b *tg.Bot, chatID int64, userID int64, st session.State, prompt string) {
 	isOwner := h.authorizer.IsOwner(userID)
 	if !isOwner {
 		h.auditEvent(entryFor(chatID, userID, false, audit.ActionAccessDenied, "agent"))

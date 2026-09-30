@@ -75,23 +75,51 @@ func NewManagerWithStateFile(path string) *Manager {
 	return m
 }
 
-func (m *Manager) Get(id string) (*State, bool) {
+// Snapshot returns a copy of the named session's state. The copy is the point:
+// a State handed out as a pointer is a live reference the caller can read and
+// write with no lock held, and the bot library dispatches every update on its
+// own goroutine, so /status and the command it is reporting on are reading and
+// writing the same struct at the same time.
+func (m *Manager) Snapshot(id string) (State, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	s, ok := m.sessions[id]
-	return s, ok
+	if !ok {
+		return State{}, false
+	}
+	return *s, true
 }
 
-func (m *Manager) Ensure(id string) *State {
+// Ensure returns the state for id, creating and persisting it if it is new.
+// The write error is reported rather than dropped: a session that could not be
+// saved comes back empty after a restart while the audit log still reads "ok".
+func (m *Manager) Ensure(id string) (State, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s, ok := m.sessions[id]; ok {
-		return s
+		return *s, nil
 	}
 	s := &State{ID: id}
 	m.sessions[id] = s
-	m.saveLocked()
-	return s
+	return *s, m.saveLocked()
+}
+
+// Mutate applies fn to the named session under the write lock, creating it if
+// it does not exist yet, and persists the result. fn is handed a pointer to the
+// live State and must not retain it: the lock is released when fn returns.
+// Saving inside the same critical section is what keeps the file and the memory
+// from disagreeing — a caller that mutated and then called Save separately
+// could interleave with another goroutine's write in between.
+func (m *Manager) Mutate(id string, fn func(*State)) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		s = &State{ID: id}
+		m.sessions[id] = s
+	}
+	fn(s)
+	return m.saveLocked()
 }
 
 // Save writes the session list to the state file, reporting any failure to the

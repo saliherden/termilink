@@ -15,7 +15,7 @@ func TestGetShellAndExec(t *testing.T) {
 	h := NewHandler(Options{
 		Runner: terminal.NewRunner("/bin/zsh", 1<<20),
 	})
-	st := &session.State{ID: "chat-1"}
+	st := session.State{ID: "chat-1"}
 	shell, err := h.getShell(st)
 	if err != nil {
 		t.Fatalf("getShell: %v", err)
@@ -62,7 +62,7 @@ func TestProjectCommandThroughShell(t *testing.T) {
 		},
 	})
 	h.closeShellFor("chat-2")
-	st := &session.State{ID: "chat-2", Project: "app", Cwd: h.projects["app"].Path}
+	st := session.State{ID: "chat-2", Project: "app", Cwd: h.projects["app"].Path}
 	command, isCd := h.resolve(st, "greet")
 	if isCd {
 		t.Fatal("greet should not be a cd")
@@ -88,7 +88,7 @@ func TestShellTairRemainsConsistent(t *testing.T) {
 		Runner: terminal.NewRunner("/bin/zsh", 1<<20),
 	})
 	defer h.Close()
-	st := &session.State{ID: "chat-3"}
+	st := session.State{ID: "chat-3"}
 	shell, err := h.getShell(st)
 	if err != nil {
 		t.Fatalf("getShell: %v", err)

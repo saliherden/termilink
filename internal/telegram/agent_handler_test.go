@@ -64,13 +64,23 @@ done
 	return path
 }
 
-func selectTestProject(t *testing.T, h *Handler, chatID int64) *session.State {
+func selectTestProject(t *testing.T, h *Handler, chatID int64) session.State {
 	t.Helper()
-	st := h.sessions.Ensure(strconv.FormatInt(chatID, 10))
+	st := h.ensureSession(strconv.FormatInt(chatID, 10))
 	h.closeShellFor(st.ID)
-	st.Cwd = h.projects["app"].Path
-	st.Project = "app"
-	return st
+	h.mutateSession(st.ID, func(s *session.State) {
+		s.Cwd = h.projects["app"].Path
+		s.Project = "app"
+	})
+	// Re-read rather than patching the value we already hold: Mutate applied the
+	// change under the manager's lock, and this is the same copy a handler gets
+	// on its next update. Returning the pre-mutation snapshot would hand the
+	// caller a state that says no project is selected.
+	fresh, ok := h.sessions.Snapshot(st.ID)
+	if !ok {
+		t.Fatalf("test setup: session %q vanished", st.ID)
+	}
+	return fresh
 }
 
 func TestAgentStartWorkerDenied(t *testing.T) {
@@ -182,7 +192,7 @@ func TestAgentLifecycle(t *testing.T) {
 func TestAgentStatusWithoutSession(t *testing.T) {
 	h, _ := testAgentHandler(t, writeAgentFixture(t))
 	h.handleCommand(context.Background(), nil, 104, testAgentOwner,
-		h.sessions.Ensure(strconv.FormatInt(104, 10)), "/agent status")
+		h.ensureSession(strconv.FormatInt(104, 10)), "/agent status")
 	if h.agentSessionFor(104) != nil {
 		h.agentCleanup(104, h.agentSessionFor(104))
 		t.Fatal("status on an empty handler opened a session")
@@ -1335,11 +1345,12 @@ func TestExitResetsContext(t *testing.T) {
 	if st.Project != "app" {
 		t.Fatalf("test setup: project = %q, want app", st.Project)
 	}
-	// LastCmd is set directly rather than by running a command: testAgentHandler
-	// wires no terminal runner, so a command would fail and never record itself.
-	// What is under test here is that /exit clears the state, not that commands
-	// populate it.
-	st.LastCmd = "git status"
+	// LastCmd is written through the manager rather than patched onto st:
+	// testAgentHandler wires no terminal runner, so a command would fail and
+	// never record itself, and the handler now hands out copies — a write to
+	// the local value would go nowhere. What is under test is that /exit clears
+	// the state, not that commands populate it.
+	h.mutateSession(st.ID, func(s *session.State) { s.LastCmd = "git status" })
 	h.handle(context.Background(), f.bot, 163, testAgentOwner, "agent ")
 	run := h.agentSessionFor(163)
 	if run == nil {
@@ -1349,18 +1360,24 @@ func TestExitResetsContext(t *testing.T) {
 
 	h.handleCommand(context.Background(), f.bot, 163, testAgentOwner, st, "/exit")
 
-	if st.Project != "" {
-		t.Errorf("/exit kept the project binding: %q", st.Project)
+	// Re-read instead of inspecting st: the copy this test is holding was taken
+	// before /exit ran, so it would report the old state whatever /exit did.
+	after, ok := h.sessions.Snapshot(st.ID)
+	if !ok {
+		t.Fatal("session missing after /exit")
 	}
-	if st.LastCmd != "" {
-		t.Errorf("/exit kept the last command: %q", st.LastCmd)
+	if after.Project != "" {
+		t.Errorf("/exit kept the project binding: %q", after.Project)
+	}
+	if after.LastCmd != "" {
+		t.Errorf("/exit kept the last command: %q", after.LastCmd)
 	}
 	want, err := os.UserHomeDir()
 	if err != nil {
 		want = "$HOME"
 	}
-	if st.Cwd != want {
-		t.Errorf("/exit left cwd = %q, want home %q", st.Cwd, want)
+	if after.Cwd != want {
+		t.Errorf("/exit left cwd = %q, want home %q", after.Cwd, want)
 	}
 	if h.agentSessionFor(163) != nil {
 		t.Error("/exit left the agent registered")
@@ -1386,9 +1403,11 @@ func TestCommandAfterExitStartsUnbound(t *testing.T) {
 		Authorizer: security.New(testAgentOwner, []int64{testAgentOwner}),
 	})
 	f := newFakeTelegram(t)
-	st := h.sessions.Ensure("164")
-	st.Project = "app"
-	st.Cwd = "/tmp"
+	st := h.ensureSession("164")
+	h.mutateSession(st.ID, func(s *session.State) {
+		s.Project = "app"
+		s.Cwd = "/tmp"
+	})
 
 	h.handleCommand(context.Background(), f.bot, 164, testAgentOwner, st, "/exit")
 
@@ -1435,7 +1454,7 @@ func TestExitResetSurvivesRestart(t *testing.T) {
 	h.handle(context.Background(), f.bot, 165, testAgentOwner, "git status")
 	h.handleCommand(context.Background(), f.bot, 165, testAgentOwner, st, "/exit")
 
-	reloaded, ok := session.NewManagerWithStateFile(statePath).Get("165")
+	reloaded, ok := session.NewManagerWithStateFile(statePath).Snapshot("165")
 	if !ok {
 		t.Fatal("session missing from the state file after /exit")
 	}

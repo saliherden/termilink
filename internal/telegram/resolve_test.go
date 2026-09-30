@@ -18,7 +18,7 @@ func testHandler() *Handler {
 
 func TestResolveProjectShortcut(t *testing.T) {
 	h := testHandler()
-	st := &session.State{Cwd: "/var/opt/srv"}
+	st := session.State{Cwd: "/var/opt/srv"}
 
 	got, isCd := h.resolve(st, "deploy")
 	if isCd {
@@ -42,7 +42,7 @@ func TestResolveProjectShortcut(t *testing.T) {
 
 func TestResolveProjectShortcutTrailingSlash(t *testing.T) {
 	h := testHandler()
-	st := &session.State{Cwd: "/var/opt/srv/"}
+	st := session.State{Cwd: "/var/opt/srv/"}
 	got, _ := h.resolve(st, "deploy")
 	if got != "make deploy" {
 		t.Fatalf("resolve with trailing slash = %q, want %q", got, "make deploy")
