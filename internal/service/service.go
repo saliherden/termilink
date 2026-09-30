@@ -43,7 +43,6 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 	}
 	runner := terminal.NewRunner(
 		cfg.Terminal.Shell,
-		cfg.Terminal.CommandTimeout.Std(),
 		cfg.Terminal.MaxOutputBytes,
 	)
 	// Manager.Save is a no-op without a state file, so an unresolvable home

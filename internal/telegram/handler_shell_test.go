@@ -13,7 +13,7 @@ import (
 
 func TestGetShellAndExec(t *testing.T) {
 	h := NewHandler(Options{
-		Runner: terminal.NewRunner("/bin/zsh", 10*time.Second, 1<<20),
+		Runner: terminal.NewRunner("/bin/zsh", 1<<20),
 	})
 	st := &session.State{ID: "chat-1"}
 	shell, err := h.getShell(st)
@@ -53,7 +53,7 @@ func TestGetShellAndExec(t *testing.T) {
 
 func TestProjectCommandThroughShell(t *testing.T) {
 	h := NewHandler(Options{
-		Runner: terminal.NewRunner("/bin/zsh", 10*time.Second, 1<<20),
+		Runner: terminal.NewRunner("/bin/zsh", 1<<20),
 		Projects: map[string]config.ProjectConfig{
 			"app": {
 				Path:     t.TempDir(),
@@ -85,7 +85,7 @@ func TestProjectCommandThroughShell(t *testing.T) {
 
 func TestShellTairRemainsConsistent(t *testing.T) {
 	h := NewHandler(Options{
-		Runner: terminal.NewRunner("/bin/zsh", 10*time.Second, 1<<20),
+		Runner: terminal.NewRunner("/bin/zsh", 1<<20),
 	})
 	defer h.Close()
 	st := &session.State{ID: "chat-3"}

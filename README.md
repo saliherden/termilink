@@ -51,7 +51,7 @@ logging with rotation).
 
 ## Requirements
 
-- Go 1.27.1+ (as required by `go.mod`)
+- Go 1.27.1 or newer (CI runs on `1.27.x`)
 - zsh, bash or sh — TermiLink drives an interactive shell session; see
   [Which shell is used](#which-shell-is-used) to pick one
 - A Telegram bot token (from [@BotFather](https://t.me/BotFather))
@@ -67,6 +67,23 @@ machine without zsh, every shell command then fails — the path is not checked
 at load time, so the error only surfaces once you send the first command.
 Install zsh (`apt install zsh`) or point that one line at your own shell.
 
+## Platform support
+
+| platform | status | notes |
+| --- | --- | --- |
+| macOS | supported | CI-tested; a launchd template ships (`scripts/com.termilink.agent.plist`) |
+| Linux | supported | CI-tested on `ubuntu-24.04`; no systemd unit ships yet |
+| Windows | **not supported** | `creack/pty` compiles there, but `StartWithSize` returns `ErrUnsupported` at runtime, so every PTY operation fails |
+
+There are no `//go:build` constraints and nothing branches on `runtime.GOOS` — the
+PTY library is what restricts it to Unix, which is also why Windows is absent
+from CI rather than failing in it.
+
+In practice: build from source. **No binaries or releases are published yet.**
+Long-polling is the transport, so the gateway needs no inbound port and works
+from behind NAT, but it does run with the full privileges of the user who
+started it — see [Known limitations](#known-limitations).
+
 ## Getting Started
 
 ```bash
@@ -81,6 +98,65 @@ go build -o termilink ./cmd/termilink
 
 Only one gateway instance may run at a time; a second `start` is rejected while
 the first is running (PID lock at `~/.termilink/termilink.pid`).
+
+## Configuration
+
+`config.yaml` in the working directory, plus `.env` (auto-loaded at startup).
+Every key, its type and its effective default:
+
+### `telegram`
+
+| key | type | default | notes |
+| --- | --- | --- | --- |
+| `bot_token` | string | — **required** | either inline or `${TELEGRAM_BOT_TOKEN}`; start fails if neither resolves |
+| `max_file_bytes` | int | `52428800` (50 MiB) | the send/zip decision threshold; must be > 0 |
+| `big_file_link_host` | string | `""` (off) | `uguu.se` or `catbox.moe`; anything else is rejected at load |
+
+### `security`
+
+| key | type | default | notes |
+| --- | --- | --- | --- |
+| `owner` | int | first entry of `allowed_users` | automatically appended to the allowlist if missing |
+| `allowed_users` | []int | — **required** | at least one Telegram user id; everyone else is rejected |
+| `approve_dangerous` | string | `all` | `all` \| `worker` \| `off` |
+| `dangerous_patterns` | []string | none | extra regexes, OR-ed with the built-in list |
+| `audit_log` | string | `~/.termilink/audit.log` | absolute path, or `off` to disable auditing |
+| `audit_max_bytes` | int | `0` (unlimited) | past this, the file rotates to `<path>.1` before the next entry |
+
+### `workspace`
+
+| key | type | default | notes |
+| --- | --- | --- | --- |
+| `allowed` | []string | `[]` | **empty means no filesystem restriction at all** — see [Known limitations](#known-limitations) |
+
+### `terminal`
+
+| key | type | default | notes |
+| --- | --- | --- | --- |
+| `shell` | string | first of `/bin/zsh`, `/bin/bash`, `/bin/sh` that exists, else `/bin/sh` | must not be empty |
+| `command_timeout` | duration | `30m` | applied as a deadline around each command; a timeout is reported, not silently dropped |
+| `max_output_bytes` | int | `1048576` (1 MiB) | raised to at least `65536`; over-long output keeps the **most recent** bytes, and the exit status is still exact |
+
+### `agent`
+
+| key | type | default | notes |
+| --- | --- | --- | --- |
+| `enabled` | bool | `true` | gates the whole feature |
+| `command` | string | `""` (auto-detect) | searches `opencode`, `claude`, `codex`, `gemini` on `PATH`; a bare name or absolute path pins one. `~` is **not** expanded — write the full path |
+| `screen.mode` | string | `png` | `png` = live screen as a color photo, `text` = code block. The screen posted when a session *ends* is always text |
+
+### `projects`
+
+| key | type | default | notes |
+| --- | --- | --- | --- |
+| `<name>.path` | string | — | working directory for `/project <name>` |
+| `<name>.commands` | map[string]string | — | named shortcuts |
+| `<name>.artifacts` | []string | — | paths collected by `get` |
+| `<name>.env` | map[string]string | — | exported into that project's shell; keys may not contain `=` or a newline, values no newline or NUL |
+
+Validation is strict where a wrong value would fail silently: `shell` must be
+non-empty, `max_file_bytes` positive, `audit_max_bytes` non-negative, and the
+three enumerated fields accept only the values listed above.
 
 ## Telegram Commands
 
@@ -115,9 +191,8 @@ A configured project command name (e.g. `build`) runs its shortcut command.
 | `/agent top`, `/agent bottom` | Jump to the oldest / newest line |
 | `/agent history exit`, `/agent off` | Drop the hint line, leave the reader's image in the chat |
 
-There is no `/agent close`: it used to hide the scrollback hint line, which is
-nothing like what the name suggests, and one name per action is worth more than a
-second spelling. Closing the session is `/agent exit`.
+There is no `/agent close`; the session is closed by `/agent exit` or
+`/agent stop`.
 
 ### Closing things — three scopes, three commands
 
@@ -130,108 +205,34 @@ to close:
 | `/agent exit` | the agent session | the shell |
 | `/exit` | **everything** — the agent session *and* the shell | nothing, and the project binding is cleared too |
 
-`/exit` is the "shut it all down and start over" command. If an agent session is
-running it is torn down too, and its **final screen is posted as text** first. The
-agent goes first on purpose: it holds its own PTY, and its screen has to be read
-while the TUI is still alive — `Close` interrupts it, and an interrupted TUI
-clears the screen and prints a goodbye banner over the session. The audit log
-records the agent stop as `agent_stop` with `cmd="exit via /exit"`, so the two
-closures stay distinguishable.
-
-`/agent stop` and `/agent exit` post that same final screen and stop there, so
-every path that ends a session — `/exit`, `/agent stop`, `/agent exit`, or the
-agent exiting on its own — leaves a readable record behind, followed by the
-session id. That was not consistently true: `/agent stop` used to send only a
-text line, and it also read the screen *after* interrupting the TUI, so it
-reported the shutdown banner rather than the session.
-
-It also **resets the context**: the project binding, the working directory and
-the last command are cleared, so the next plain message starts fresh in your
-home directory. That part is not cosmetic — see
-[`/exit` did nothing you could see](#exit-did-nothing-you-could-see).
-
-### Photos while it runs, text when it stops
-
-The live screen is relayed as a **photo**. That is the right medium for it: the
-frame is re-uploaded about three times a second, a document per frame would drop
-a file card into the chat on every tick, and the reader is watching a moving
-screen and opens it deliberately.
-
-The final screen is **text**. When the agent stops — via `/agent stop`,
-`/agent exit`, `/exit`, or by exiting on its own — the screen is posted as a code
-block, because that is what the output actually is. A rendered PNG of the same
-screen is neither copyable nor searchable, and a terminal transcript is something
-you paste into an editor, quote to somebody, or grep later. The photo stays for
-the one thing a photo is good at: showing what it looked like while it ran.
-
-So the two are deliberately different, and the split is about *use*, not about
-how wide the screen is:
-
-| | sent as | why |
-| --- | --- | --- |
-| live screen (every frame) | **photo** | re-uploaded ~3×/second; a document per frame would drop a file card into the chat on every tick |
-| final screen (`/agent stop`, `/agent exit`, `/exit`, or the agent exiting on its own) | **text**, a code block | it is written output, not a picture of one — copyable, searchable, pasteable |
-| scrollback reader (`/agent history`) | **document** | a page of scrollback is as wide as the TUI, and Telegram does not scale documents, so it opens at native resolution |
-
-The exit text is the **visible screen at the moment the agent stopped**, read
-*before* the session is interrupted. Both halves of that matter. `Close` sends
-Ctrl-C and SIGINT, and a real TUI answers that by clearing the screen and
-printing a goodbye banner — so a screen read afterwards is a perfectly correct
-transcript of the shutdown, and a couple of stray words is exactly what the owner
-saw. Reading first costs nothing: the process is alive to be interrupted either
-way. `/agent stop` used to do the opposite, and the two paths disagreed about it,
-which is why the same session could report two different things depending on how
-it was closed.
-
-The limitation worth stating: this is the window the TUI was showing, not the
-whole conversation. Your prompts scroll up and off the top of the 40-row window,
-so the exit text holds the tail of the session. For the whole thing, use
-`/agent history` — that is what the reader is for.
+`/exit` is the "shut it all down and start over" command. It stops the agent
+before closing the shell, so TermiLink can capture its final visible screen, then
+clears the project binding, the working directory and the last command.
+`/agent stop` and `/agent exit` capture that same final screen but leave the
+shell and the project in place, so every path that ends an agent session — those
+two, `/exit`, or the agent exiting on its own — leaves a readable record behind.
 
 ### The exit message carries the session id
 
 Once the agent has closed, TermiLink asks its CLI which session that run was and
-puts the id in the chat, together with the command that reopens it:
+posts the id with the command that reopens it:
 
 ```
 🆔 Session `ses_f318e258fffe5G8PbTz5Zh` — resume with `opencode -s ses_f318e258fffe5G8PbTz5Zh`
 ```
 
-The id is not scraped out of the TUI — there is nothing there worth scraping, and
-a screen reader is the wrong place to go looking for an identifier. The CLI is
-asked directly, after the run, and only opencode-compatible CLIs answer
-(`session list --format json`); a CLI that does not understand the subcommand is
-detected once and the feature steps aside quietly from then on. Nothing about the
-exit depends on it — the screen text has already been sent by then, and the id
-follows it as a separate message precisely so a slow or unsupported CLI cannot
-delay the output.
-
-Where the project already has sessions, deciding which row belongs to the run is
-a real question, so the answer is deliberately conservative. Rows created during
-the run's own lifetime are collected, and the id is reported **only if exactly
-one** of them exists. Zero means the agent exited before its first turn.
-More than one means something else started a session in the same directory at the
-same moment, and TermiLink declines to guess: a wrong id looks authoritative and
-walks you into the wrong conversation, which is worse than reporting none. No id
-is ever invented or filled in.
+Only opencode-compatible CLIs answer (`session list --format json`); one that
+does not understand the subcommand is detected once and the feature steps aside.
+The id is reported **only if exactly one** session was created during the run —
+never guessed, never invented.
 
 ### A slash is only a command when the bot knows it
 
-A leading `/` does **not** by itself make a message a command. The bot matches
-the first word against its command table:
-
-- **known command** → it runs (`/status`, `/agent up`, `/exit`, …)
-- **unknown slash word, agent running** → the whole message is typed into the
-  agent, so `/update.sh`, `/etc/hosts has the entry` or a mistyped
-  `/agent stpo` reach the TUI as text instead of being refused
-- **unknown slash word, no agent** → `⚠️ Unknown command`, as before
-
-This is why there is no `/up` command. Arrow keys, `esc`, `enter` and friends are
-sent by typing the **bare word** — `up`, `down`, `esc`, `enter` — which can never
-collide with a real command, and the slash variants were dropped because Telegram's
-command autocomplete rewrites the input box around them and because the old
-`/up <text>` handling silently discarded the trailing text. Known commands always
-win, so the pass-through never shadows one.
+A leading `/` is treated as a command only when it matches a known command.
+Unknown slash-prefixed messages are passed to the running agent as text; without
+an agent they return `⚠️ Unknown command`. Special TUI keys are typed without a
+slash — `up`, `down`, `esc`, `enter` — so they can never collide with a real
+command.
 
 ## Agent (TUI bridge)
 
@@ -250,18 +251,25 @@ PID: 31337
 
 While a session is active, every message you send is **typed into the agent's
 input box** (Enter appended), so the workload runs interactively inside the
-agent. Each message starts a new turn: its screen is posted as a **colored image
-screenshot** and live-updated in place while the agent renders. When the session
-ends, the screen you are left with is plain text.
+agent. Each message starts a new turn. Set `agent.screen.mode: text` to drop the
+live images and get copyable text for the whole session.
 
-Which medium is used is decided by what the thing is, not by how wide the screen
-is: a photo for the moving screen, text for written output, and a document for
-the reader. The reasoning is in
-[photos while it runs, text when it stops](#photos-while-it-runs-text-when-it-stops).
-Set `agent.screen.mode: text` to drop the live images as well and get copyable
-text for the whole session.
+### What arrives in the chat, and as what
 
-Supported keys:
+The medium follows what the thing is, not how wide the screen is:
+
+| | sent as | why |
+| --- | --- | --- |
+| live screen (every frame) | **photo** | re-uploaded ~3×/second; a document per frame would drop a file card into the chat on every tick |
+| final screen (`/agent stop`, `/agent exit`, `/exit`, or the agent exiting on its own) | **text**, a code block | it is written output, not a picture of one — copyable, searchable, pasteable |
+| scrollback reader (`/agent history`) | **document** | a page of scrollback is as wide as the TUI, and Telegram does not scale documents, so it opens at native resolution |
+
+The final screen is the window the TUI was showing at the moment the agent
+stopped, not the whole conversation: your prompts scroll up and off the top of
+the 40-row window, so it holds the tail of the session. For the whole thing, use
+`/agent history`.
+
+### Keys
 
 | You type… | Meaning |
 | --- | --- |
@@ -272,221 +280,33 @@ Supported keys:
 | `^x l` | **key chord**: `Ctrl+X` then `l` (switch session) — opencode uses `ctrl+x` chord shortcuts like `ctrl+x n` (new session), `ctrl+x m` (switch model) |
 | `^p enter` | chord that ends with Enter (select the highlighted palette entry) |
 
-Type the key names **without a slash** — `up`, not `/up`. Anything the bot does
-not recognize as a command is passed to the agent as text, so a leading slash
-never hides what you wrote, and the bare words can never be mistaken for a
-command.
+Navigation inside panels is **`↑`/`↓` + `enter` to select, `esc` to close**. Key
+names go in without a slash — `up`, not `/up`, for the reason given in
+[A slash is only a command when the bot knows it](#a-slash-is-only-a-command-when-the-bot-knows-it).
 
-Navigation inside panels is **`↑`/`↓` + `enter` to select, `esc` to close**.
+### The scrollback reader
 
-Session management: `/agent status` shows the run, `/agent stop` (or
-`/agent exit`) closes it gracefully, and **`/agent history`** opens the scrollback
-reader. The reader is a
-single message you *scroll* rather than a set of numbered pages: it starts at the
-newest line, `/agent up` and `/agent down` move one screenful at a time and
-repaint that same message in place, `/agent top` and `/agent bottom` jump to
-either end, and `/agent history exit` (short: `/agent off`) drops the hint line
-and leaves the image in place so you can keep re-reading it — reopening with
-`/agent history` brings the hints back. Scrolling is deliberately slash-only —
-the bare words `up` and `down` stay reserved for the TUI's arrow keys, so
-scrolling can never swallow a key you meant for the agent. The view spans
-everything the TUI has drawn — the lines that scrolled off *plus* the rows
-currently on screen, so scrolling up from the bottom never hits a gap. Consecutive
-screens overlap by four lines, which means walking to the top shows every line at
-least once; the scrollback itself is capped at the last 2000 distinct lines. The
-reader renders in the agent's own colors with a `AGENT SCROLLBACK` title bar
-naming the visible slice, so the image reads like a terminal window rather than a
-flat wall of text, and it arrives as an image in `png` mode or a code block in
-`text` mode.
-Because a long assistant reply can be far longer than the 40-row terminal window,
-this is how you re-read it while the session keeps running. **Only the owner**
-can start an agent or write into one — the running agent has the same machine
-permissions as the bot user, so it is never exposed to workers.
+`/agent history` opens it; `/agent up` and `/agent down` move one screenful at a
+time and repaint the same message in place, `/agent top` and `/agent bottom` jump
+to either end, and `/agent history exit` (short: `/agent off`) drops the hint
+line and leaves the image in the chat to re-read later.
 
-```yaml
-agent:
-  enabled: true            # false disables the whole feature
-  command: ""              # "" = auto-detect (opencode → claude → codex → gemini)
-                           #     or a name on PATH ("opencode") or an absolute
-                           #     path ("/usr/local/bin/opencode").
-                           #     `~` is NOT expanded — write the full path.
-  screen:
-    mode: png              # "png" = colored screenshot, "text" = code block
-                           # (live screen only; the final screen is always text)
-```
+It is a single message showing up to 40 rows rather than a set of numbered
+pages, and it renders in the agent's own colors. Consecutive screens overlap by
+four lines, so walking to the top shows every line at least once; near the top
+the window is allowed to become **shorter** than 40 rows and shows what is left
+above rather than skipping it. The view spans the lines that scrolled off *plus*
+the rows currently on screen, so scrolling up from the bottom never lands in a
+gap; the scrollback itself is capped at the last 2000 distinct lines. Scrolling
+is slash-only, so the bare words `up` and `down` stay reserved for the TUI's
+arrow keys. This is how you re-read a long reply while the session keeps running.
 
-### How the scrollback reader works
+**Only the owner** can start an agent or write into one — the running agent has
+the same machine permissions as the bot user, so it is never exposed to workers.
 
-The reader is not a transcript recorder. It is built from the same terminal
-emulator that draws the live screen, so it inherits the agent's real colors,
-panels and box drawing instead of approximating them:
+## Files & artifacts
 
-1. **The screen keeps a scrollback.** `Screen.persistScroll` runs on every frame
-   and moves the rows that *left* the visible window into a transcript. Each
-   distinct line is stored at most once, so a TUI that repaints its status line
-   or animates a spinner does not fill the buffer with duplicates. Lines shorter
-   than three characters are skipped as spinner noise, and the transcript is a
-   FIFO capped at the last **2000** lines.
-2. **Rows are stored as cells, not text.** A captured row is a `Row`: its plain
-   `Text` plus one `RowCell` per rune carrying the foreground and background in
-   effect when it was written. This is what makes the reader colored — an
-   earlier version kept only the text and had to be drawn in a single color.
-3. **The view is transcript + live rows.** `Session.ViewRows` returns the
-   transcript followed by the rows still on screen, de-duplicated against
-   adjacent repeats. The live rows are *appended*, not snapshotted, so scrolling
-   up from the bottom never lands in a gap between what scrolled away and what
-   is displayed now.
-4. **One message, repainted in place.** The reader is a single Telegram message
-   showing up to 40 rows. `/agent up` and `/agent down` move the window by 36
-   lines — 4 lines of overlap, so no line is ever skipped and every line is seen
-   at least once on the way to the top. Near the top the window is allowed to
-   become **shorter** than 40 rows and shows what is actually left above, rather
-   than refusing to move: forcing a full page there used to skip the lines in
-   between (at 57 lines, one `/agent up` jumped from 57 to 40 and hid 41–57 for
-   good). Each move re-renders and edits that same message, so a long read never
-   floods the chat and the live screen relay keeps updating in parallel.
-5. **The image gets a title bar.** `RenderRowsPNG` draws the rows with their own
-   colors plus a `AGENT SCROLLBACK · <first>–<last> of <total>` strip, so the
-   picture reads as a terminal window and always says where you are.
-6. **It is uploaded as a document, and still repainted in place.** A page is as
-   wide as the TUI, so a photo of it would be scaled down to the chat bubble and
-   be illegible. Uploading a document instead costs nothing: `editMessageMedia`
-   takes a document as well as a photo, so the "one message, scrolled" design is
-   unaffected.
-
-There is deliberately no `/agent close` alias for this. It once existed, and it
-only hid the hint line — a name that reads like "shut the agent down" while doing
-something much smaller, which is the worst kind of surprise a command can offer.
-`/agent history exit` (short: `/agent off`) only clears the hint line and
-repaints the current view, so the image stays in the chat to re-read later; the
-agent session keeps running either way. Reopening with `/agent history` — or
-scrolling again with `/agent up` — brings the hints back.
-
-Twelve bugs worth knowing about, all fixed and all now covered by tests:
-
-- **The alias path swallowed text.** `/up`, `/down`, `/esc` … used to be commands
-  of their own that forwarded a key to the TUI. Anything after the key word —
-  `/up uygula` — was parsed and then **discarded without a word**, so the text
-  you had typed vanished and only a bare arrow reached the agent. They also
-  collided with Telegram's command autocomplete, which rewrites the input box
-  around a slash command. The bare key words do the same job and cannot collide
-  with anything, so the slash commands are gone; see
-  [a slash is only a command when the bot knows it](#a-slash-is-only-a-command-when-the-bot-knows-it).
-- **The alias path skipped the owner check.** It wrote to the TUI without
-  verifying who asked, so a non-owner could type into the owner's agent session
-  — the one place where the owner-only rule actually matters, since the agent
-  runs with the bot user's own permissions. The regression test types `/enter`
-  as a worker and asserts the fixture never echoes it.
-- **The renderer was shared across goroutines.** The live screen and the
-  scrollback reader both draw through `drawGlyph`, and they both used one
-  global `font.Face`. An `opentype.Face` is **not** safe for concurrent use —
-  every `Glyph` call rewrites the face's own sfnt buffer, mask image and vector
-  rasterizer. A relay frame landing on top of an `/agent history` render
-  corrupted the mask bounds and the process died with
-  `panic: slice bounds out of range … [104:42]` inside `vector.fixedLineTo`,
-  taking the whole bot with it and leaving every later command unanswered.
-  `renderMu` now serializes glyph drawing;
-  `TestRenderConcurrentWithScreen` renders both paths from 8 goroutines and
-  fails under `-race` without it.
-- **A panic killed the bot silently.** The Telegram library dispatches each
-  update on its own goroutine and nothing recovered from it, so any fault in any
-  handler stopped the entire gateway. Update handling now recovers, writes the
-  panic and its stack to the log and the audit trail as `panic`, and tells the
-  owner the bot is still running. The relay does the same per frame and falls
-  back to text for the rest of the session.
-- **`/agent exit` could answer nothing.** Tearing an agent session down is
-  claimed by whichever goroutine arrives first: the command, or the relay, which
-  fires `onAgentExit` when the process exits on its own. If the command lost that
-  race it returned without sending anything, so the session was closed, the
-  audit log had recorded `agent_stop`, and the owner saw silence — the command
-  looked broken. Both losing paths now say what happened, and
-  `TestAgentCleanupSingleWinner` pins the invariant that exactly one goroutine
-  can win a teardown, so the two paths never announce one closure twice.
-- **`/exit` left the agent running.** The agent opens its own PTY and is tracked
-  in a separate map from the persistent shell, so `/exit` — which only tore down
-  the `zsh -i` session — left the agent process alive and its screen frozen
-  mid-turn. `/exit` now closes both and posts the agent's final screen as text
-  before the shell goes down; `/agent exit` is unchanged and still closes only the
-  agent.
-<a id="exit-did-nothing-you-could-see"></a>
-
-- **`/exit` did nothing you could see.** It closed both processes and left the
-  session state alone, and because the state is what `getShell` reads, the very
-  next plain message opened a fresh shell **in the same directory, under the same
-  project** — a new pid and nothing else. The audit log showed an `exit`; the chat
-  showed a working session, indistinguishable from before. Worse, `/exit` was
-  reaching for a job `/stop` (a running command) and `/agent stop` (the agent)
-  already do, which left "reset my context" as the one thing only `/exit` could
-  mean. `/exit` now clears the project binding, the working directory and the last
-  command, and says so. The working directory is set to `$HOME` explicitly rather
-  than left empty, because an empty `Cwd` falls back to the *gateway process's*
-  working directory — wherever the bot happened to be started, not a predictable
-  "home". `TestExitResetsContext`, `TestExitResetSurvivesRestart` (the state file
-  is reloaded, so the reset has to outlast a restart) and
-  `TestCommandAfterExitStartsUnbound` (the next command comes back with no
-  `TERMILINK_PROJECT`) pin it.
-- **The final screen was an image, and now it is text.** A chain of reports: an
-  unreadable thumbnail, then a magnified scrap, then a couple of stray words.
-  Each was chased as a rendering problem and none of them was one. The exit
-  announcement was reading a *picture* of a terminal, and a picture of a
-  terminal cannot be copied, searched, or pasted into an editor — which is what
-  the owner wanted from it all along. The exit now posts the screen as a code
-  block, read from the visible window before the session is interrupted, and the
-  session id alongside it so the conversation can be reopened
-  (`opencode -s <id>`). The live relay keeps sending photos: that is a picture of
-  a moving screen and belongs in a bubble. `TestExitSendsTheAgentScreenAsText`
-  and `TestExitScreenIsReadBeforeTheTUIShutsDown` pin the new behaviour;
-  `TestRelayStillSendsPhotos` pins the half that did not change.
-- **Reading the screen at close was a race with the shutdown, and `/agent stop`
-  lost it every time.** `Close` sends Ctrl-C and SIGINT; a TUI answers by
-  clearing and drawing a banner. `/exit` read the screen first, but
-  `handleAgentStop` called `Close` *before* reading, so `/agent stop` reported
-  the shutdown — which is what "a couple of stray words" actually was. The two
-  paths had disagreed about the ordering since the announcement was first wired
-  up. `captureAgentExitScreen` is now called before `Close` on every path.
-  `TestExitScreenIsReadBeforeTheTUIShutsDown` uses a fixture that answers SIGINT
-  the way a TUI does, and asserts the delivered message contains the session and
-  not the banner.
-- **A reported session id can be wrong, which is worse than none.** The id is not
-  read off the screen; the CLI is asked directly once the run is over, which
-  means choosing between the project's existing sessions. Recency alone would be
-  a guess. The lookup collects the sessions created during the run's own lifetime
-  and reports an id **only when exactly one** of them exists — zero means the
-  agent exited before its first turn, and more than one means something else
-  started a session here at the same moment. `resolveAgentSessionID` returns ""
-  in both cases rather than picking one. A failed probe is cached, because a CLI
-  that does not support `session list` will not start supporting it on the next
-  close, but a run that was never wired up to ask is not cached: doing that would
-  disable the lookup for every other chat in the process.
-  `TestResolveAgentSessionIDDeclinesWhenAmbiguous` and
-  `TestResolveAgentSessionIDSkipsCLIsWithoutSessionList` pin those two decisions,
-  and `TestExitFollowsTheScreenWithTheSessionID` plus
-  `TestExitSurvivesACliWithNoSessionList` pin that the screen text still goes out
-  first, with the id only ever following it.
-- **`/agent exit` posted no screenshot at all.** `announceAgentExit` was wired
-  into `/exit` and into the natural-exit relay but not into `handleAgentStop`, so
-  `/agent stop` and `/agent exit` closed the session and sent only a text line.
-  The last image left in the chat was the live relay's scaled-down photo — so the
-  final-frame bugs above were invisible on that path, and the owner's "the
-  screenshot came out broken" was really "there was no screenshot". The path now
-  posts the final screen before its confirmation, and
-  `TestAgentExitWinsTheRace` asserts the screen text is actually sent — the same
-  reason the bug survived: the test only ever checked the text line.
-- **`/agent close` did something other than what it said.** It was an alias for
-  hiding the scrollback hint line — not for closing anything. Someone typing it
-  would reasonably expect the session to end, and instead one line of text would
-  disappear while the CLI kept running with the project directory still held. The
-  alias is gone; the session is closed by `/agent stop` or `/agent exit`, and
-  `TestAgentCloseIsNotACommand` pins that `/agent close` is rejected *and* leaves
-  the process alive.
-
-Note: while the agent session is open, the agent process holds the project
-directory — don't start the same CLI by hand in that same folder. `/agent stop`
-(or `/agent exit`) releases it and leaves everything else alone. `/exit` releases
-it too, and additionally clears the project binding and working directory, so
-reach for it when you want the whole context gone rather than just the process.
-
-## Files & Artifacts
+### Downloading
 
 `get` copies files from the machine into the chat. It has **two modes**; the
 bot decides which one to use from what you type:
@@ -504,12 +324,11 @@ release/14` finds `release/14.apk` even though it contains a slash.
 
 `get` also works as `/get` — both spellings are accepted. Note: if a project
 defines a command shortcut named `get`, file fetching wins. Files that still
-exceed the sending limit are offered as a temporary link — see **Size limits**.
+exceed the sending limit are offered as a temporary link — see
+[Size limits](#size-limits).
 
-### Artifacts (build outputs)
-
-Define which files count as artifacts per project; they are searched
-recursively and newest-first:
+Which files count as artifacts is per project; they are searched recursively and
+newest-first, at most 15 per request:
 
 ```yaml
 projects:
@@ -518,14 +337,12 @@ projects:
     artifacts: [ "*.apk", "dist/*.zip" ]   # glob vs. file name, or vs. relative path
 ```
 
-Globs match against the file name (`*.apk`) or, when they contain a `/`,
-against the path relative to the project (`dist/*.zip`). Artifact mode sends
-at most 15 files per request.
+Globs match against the file name (`*.apk`) or, when they contain a `/`, against
+the path relative to the project (`dist/*.zip`).
 
-With a project selected, `TERMILINK_PROJECT=<name>` is already exported into
-the shell. Add more per-project variables with `env:` — they are exported when
-the shell session is (re)created (first command, `/project` switch, or
-`/exit`):
+With a project selected, `TERMILINK_PROJECT=<name>` is already exported into the
+shell. Add more per-project variables with `env:` — they are exported when the
+shell session is (re)created (first command, `/project` switch, or `/exit`):
 
 ```yaml
 projects:
@@ -536,22 +353,22 @@ projects:
       NODE_ENV: production
 ```
 
-### Uploading (chat → machine)
+If a command's output exceeds the Telegram message limit, TermiLink does not
+truncate silently — a **preview** is shown and the **full text arrives as an
+`output.txt` document**.
+
+### Uploading
 
 Just **send a document** in the chat — it is saved into the session's working
 directory automatically. Files are never overwritten: a duplicate gets a `-1`
-suffix (`notes.md` → `notes-1.md`). Workers must select a project first.
+suffix (`notes.md` → `notes-1.md`). A document over the sending limit is
+rejected with a clear message.
 
 ### Size limits
 
 Telegram lets bots send single documents up to **50 MB**. TermiLink handles
-bigger files like this:
-
-```yaml
-telegram:
-  max_file_bytes: 52428800      # zip decision / upload cap, default 50 MB
-  big_file_link_host: uguu.se   # "" (off) | uguu.se | catbox.moe
-```
+bigger files like this, using [`telegram.max_file_bytes` and
+`telegram.big_file_link_host`](#telegram):
 
 - **≤ 50 MB** → sent directly as a document.
 - **> 50 MB** → zipped on the fly first; if the archive fits, it is sent as
@@ -560,51 +377,51 @@ telegram:
   queued behind an **owner approval** in chat — the bot asks *"File exceeds
   Telegram's 50MB sending limit. Send it via a temporary link on `<host>`?"*
   Confirming with `yes` / `evet` / `ok` uploads a **`.tar` archive** of the
-  file (so restricted types like `.apk` pass, and retention still applies)
-  and posts the download link as a message (tap and save on your phone).
+  file (so restricted types like `.apk` pass) and posts the download link as a
+  message (tap and save on your phone).
 - **`big_file_link_host` blank** → the clear size error is kept, nothing
   leaves the machine.
 
-Link retention: `uguu.se` auto-deletes after ~3 hours (accepts up to ~128 MB
-per file); `catbox.moe` persists (up to 200 MB, may be purged after long
-inactivity). `.apk` and other
-restricted types are rejected by uguu — the `.tar` envelope handles that.
-⚠️ While active, the link is **public** (unguessable URL) — never send
-confidential files this way. Every step is audited (`approval_*`,
-`file_link`).
+### External links
 
-- **Uploading:** a document over the limit is rejected with a clear message.
+⚠️ External links are anonymous public URLs hosted outside your machine.
+**Do not use this path for secrets, credentials or customer data.**
 
-### Long command output
+| host | size cap | retention | deleteable by TermiLink? |
+| --- | --- | --- | --- |
+| `uguu.se` | ~128 MB | auto-deleted after ~3 hours | yes, by the host's own timer |
+| `catbox.moe` | 200 MB | **persists** — removed only if the host purges it for inactivity | **no** |
 
-If a command's output exceeds the Telegram message limit, TermiLink does not
-truncate silently — a **preview** is shown and the **full text arrives as an
-`output.txt` document**.
+The URL is unguessable, but the file is served to anyone who has it and the host
+operator can read it for as long as it is up — with `catbox.moe` that includes a
+`.tar` of what you sent, potentially indefinitely, on infrastructure you do not
+control. The host is a single global setting in `config.yaml`, so every oversized
+file goes through it; leave it empty and accept the size error unless you have a
+reason to send something off the machine.
+
+Owner approval gates the transfer and every step is audited (`approval_*`,
+`file_link`), but approval is a prompt in the chat, not a confidentiality
+control: approving it *is* the act of publishing the file.
 
 ### Access control
 
-- **Owner** — unrestricted file access and uploads.
-- **Workers** — must select a project first; every file delivery is checked
-  against the workspace policy (`deliver <path>` vet).
+Owner: unrestricted. Workers: must select a project; every delivery is vetted
+against the workspace policy. See [Security](#security).
 
 ## Security
 
 ### Roles
 
-- **Owner** — full access: free `cd`, all commands, and the only user that can
-  approve dangerous commands.
-- **Workers** — restricted: cannot `cd`, must select a project first, and are
-  bound to the workspace policy.
+**Owner** — full access: free `cd`, all commands, and the only user that can
+approve dangerous commands or control an agent session. **Workers** — restricted:
+cannot `cd`, must select a project first, and are bound to the workspace policy.
+See [Known limitations](#known-limitations) before adding a second user.
 
 ### Dangerous command approval
 
-```yaml
-security:
-  approve_dangerous: all   # all (default) | worker | off
-  dangerous_patterns: []   # optional extra regexes that also require approval
-```
-
-When a message matches a dangerous pattern it is **queued, not executed**:
+Configured as `security.approve_dangerous` and `security.dangerous_patterns`
+(see [Configuration](#security)). When a message matches a dangerous pattern it
+is **queued, not executed**:
 
 1. Bot replies: `⚠️ Dangerous command detected: … — reply yes / evet / ok to
    approve or no / hayır to reject (2m0s). The command will not run until
@@ -634,37 +451,21 @@ Add your own triggers with `dangerous_patterns` (Go `regexp` syntax), e.g.
 
 ### Workspace policy (workers)
 
-```yaml
-workspace:
-  allowed:
-    - /Users/you/projects
-```
-
-When `workspace.allowed` is non-empty, workers may only access paths under one
-of the allowed roots: out-of-scope absolute paths, `~`/`$HOME` paths and `..`
-escapes in their commands are rejected, and `/project` refuses projects outside
-the allowed roots. The owner is never bound by this policy.
-
-Note: this is a **policy-level guard, not an OS sandbox** — relative paths and
-shell expansions are trusted to the user, and the owner is fully trusted.
+Configured as `workspace.allowed` (see [Configuration](#workspace)). When it is
+non-empty, workers may only access paths under one of the allowed roots:
+out-of-scope absolute paths, `~`/`$HOME` paths and `..` escapes in their
+commands are rejected, and `/project` refuses projects outside the allowed roots.
+The owner is never bound by this policy. **Empty — the default — means no
+restriction at all**, so read
+[Known limitations](#known-limitations) before adding a second user.
 
 ### Audit logging
 
-```yaml
-security:
-  audit_log: ""       # empty = ~/.termilink/audit.log, "off" disables, or a path
-  audit_max_bytes: 0  # rotate to audit.log.1 once exceeded (0 = unlimited)
-```
-
-Every security-sensitive event is appended to the audit file as one JSON line
-per event: commands (with result, duration and exit state), the danger-approval
-flow (requested / approved / rejected / blocked / timeout), whitelist
-rejections, workspace vet blocks, project switches, `/input`, `/stop` and
-`/exit`. Obvious secret values in commands (`password=…`, `token=…`,
-`Authorization: Bearer …`, …) are written as `***redacted***`; the executed
-command is never modified.
-
-The action names written today:
+Configured as `security.audit_log` and `security.audit_max_bytes` (see
+[Configuration](#security)). Every security-sensitive event is appended as one
+JSON line per event: commands (with result, duration and exit state), the
+danger-approval flow, whitelist rejections, workspace vet blocks, project
+switches, `/input`, `/stop` and `/exit`.
 
 | action | raised when |
 | --- | --- |
@@ -672,11 +473,16 @@ The action names written today:
 | `approval_requested`, `approval_approved`, `approval_rejected`, `approval_blocked`, `approval_timeout` | the dangerous-command flow |
 | `access_denied` | a non-owner, or a non-whitelisted user, tried to do something |
 | `project_switch`, `vet_blocked`, `file_get`, `file_upload`, `file_link` | project and file activity |
-| `agent_start`, `agent_input`, `agent_stop`, `agent_history`, `agent_session`, `agent_error` | agent sessions — including which slice of scrollback was rendered, the session id that was reported, and `cmd="exit via /exit"` when `/exit` closed the agent |
+| `agent_start`, `agent_input`, `agent_stop`, `agent_history`, `agent_session`, `agent_error` | agent sessions |
 | `panic` | a fault was contained; the message and stack also go to the log |
 
 `panic` is the one to grep for first when the bot goes quiet: it means a command
-died but the gateway survived.
+died but the gateway survived. Obvious secret values in commands
+(`password=…`, `token=…`, `Authorization: Bearer …`) are written as
+`***redacted***`; the executed command is never modified. Auditing never takes
+the agent down — write errors are reported once to stderr and ignored.
+`security.audit_log: off` disables it entirely, and `audit_max_bytes` (default
+`0` = unlimited) rotates to `audit.log.1` once the file exceeds it.
 
 Read recent entries with:
 
@@ -686,11 +492,48 @@ termilink audit -n 100   # last 100 entries
 termilink audit --json   # raw JSON lines, e.g. for machine processing
 ```
 
-Auditing never takes the agent down — write errors are reported once to stderr
-and ignored. `security.audit_log: off` disables it entirely. To keep the log
-from growing forever, set `audit_max_bytes` (default `0` = unlimited); once the
-file exceeds it, the current log is rotated to `audit.log.1` before the next
-entry.
+### Known limitations
+
+This runs arbitrary commands as your user account, so the boundary of what it
+actually enforces matters more than the feature list. Each item below is a
+deliberate, current limitation, not a roadmap promise.
+
+**The workspace policy is not a sandbox, and is not scoped by default.** With
+`workspace.allowed` empty — the default — there is no filesystem restriction at
+all: any allowed user can read and write anything the process can. Even when you
+do configure it, the guard is a text-level check over the command's tokens, so
+relative paths, command substitution (`$(cd /etc && …)`) and symlinks pass
+straight through. Set `workspace.allowed` before adding a second user, and treat
+workers as trusted.
+
+**The dangerous-command gate is a regex, not a policy engine.** It matches eight
+built-in patterns against the raw text, so a command that reaches the same effect
+without matching one — `find … -delete`, `git clean -fdx`, a script that does the
+work — is not gated. With `approve_dangerous: worker` the owner is exempt
+entirely. Approval means "the owner said yes in chat"; once given, the command
+runs with the full privileges of the user who started the gateway.
+
+**The owner is unrestricted by design.** The owner may `cd` anywhere, is not
+bound by `workspace.allowed`, and is the only role that can approve a dangerous
+command or control an agent session. There is no second tier of privilege above
+or below that.
+
+**There is no chat-type or chat-allowlist check.** Authorization is keyed on the
+Telegram user id alone (`security.allowed_users`); nothing inspects whether the
+message arrived in a private chat, a group or a channel. If the bot is added to a
+group where an allowed user is a member, commands execute there and the output —
+including file contents — is posted to the group. Session state is keyed by chat
+id, so one group is one persistent shell. Keep the bot in a private chat.
+
+**The bot token is the whole perimeter.** A leaked token means anyone who can
+reach the bot's username can act as an allowed user, and the allowlist is the
+only thing between them and your shell. Rotate with `@BotFather /revoke` and
+update `.env`. Note that the audit redaction is regex-based: a secret passed
+without one of those labels is written to the audit log verbatim.
+
+**External file links are public and, on `catbox.moe`, permanent** — see
+[External links](#external-links). This is the only path where file content
+leaves the machine to a third party.
 
 ## Run as a service
 
@@ -741,25 +584,128 @@ termilink init         # scaffold a config file
 ```bash
 make build
 make run
-make test
+make test   # CI additionally runs the race detector
 ```
+
+## Architecture
+
+| package | what lives there |
+| --- | --- |
+| `cmd/termilink` | cobra CLI and the `start` entry point |
+| `internal/config` | YAML + `.env` loading, secret redaction |
+| `internal/instance` | single-instance PID lock |
+| `internal/terminal` | the PTY, the command frame and its parsers |
+| `internal/telegram` | update dispatch, command handlers, per-session locks |
+| `internal/session` | persisted session state |
+| `internal/agent` | TUI bridge, terminal emulator, renderer |
+| `internal/security` | roles, dangerous-command vet, workspace policy |
+| `internal/audit` | append-only JSONL audit log |
+
+Two decisions are worth knowing before reading the code. **The command frame:**
+every command runs in the persistent shell wrapped in `crypto/rand` markers, and
+the shell appends its own exit status and cwd inside them —
+
+```
+<startTok>  <the command's output>  TLM_RC:<status>  TLM_PWD:<cwd>  <stopTok>
+```
+
+Both parsers scan **backwards** and take the last match, so a command cannot
+speak for the shell's own status or directory. **One command per session, at a
+time:** the Telegram library dispatches each update on its own goroutine, so the
+busy state is a per-session `TryLock` rather than a flag read and set twenty lines
+apart — and `/stop` and `/status` never take it, because an interrupt that waits
+behind the command it exists to interrupt is not an interrupt.
+
+## Troubleshooting
+
+**"Unknown command" for something that looks like a command.** A leading `/`
+only makes it a command if the bot knows the word; with an agent running, an
+unknown one is typed into the agent as text. See
+[A slash is only a command when the bot knows it](#a-slash-is-only-a-command-when-the-bot-knows-it).
+
+**Every shell command fails on a machine without zsh.** `config.example.yaml`
+sets `/bin/zsh` explicitly, which overrides auto-detection, and the path is not
+checked at load time — install zsh or point `terminal.shell` at your own shell.
+
+**A second `termilink start` is refused.** The PID lock at
+`~/.termilink/termilink.pid` is held by another instance — stop it, or delete the
+file if you are sure nothing is running.
+
+**`agent` says the project is not set.** It runs inside the selected project
+directory, so send `/project <name>` first.
+
+**`get` sent a search instead of the file you meant.** An argument that looks
+like a path to an existing file is a file; anything else is a keyword matched
+against artifact names. `get ./release/app.apk` is that file, `get release/14` is
+a search for `release/14.apk`. See [Downloading](#downloading).
+
+**A file over 50 MB was not sent.** Without `big_file_link_host` set it is
+refused and nothing leaves the machine; with a host set it needs an owner
+approval and the link is **public**. See [Size limits](#size-limits).
+
+**The bot went quiet.** `termilink audit | grep panic` first: a contained fault
+is recorded there and the gateway is still running.
+
+## Roadmap
+
+Ordered by what is actually queued, not by wish list. Nothing here is promised
+on a date.
+
+**Next up**
+
+- **Second-user verification** — the worker path has never been exercised with a
+  real second Telegram account, which is also the only thing that would prove the
+  branch ruleset gates anything.
+- **Bot token rotation** — the token in use was shared in chat during
+  development. Deferred until the deployment is settled, but a real exposure.
+- **Session state race** — `st.Cwd` / `st.Project` / `st.LastCmd` are written by
+  the command goroutine and read by `/status` from another: the same exposure the
+  command-busy flag had, across 38 sites in three packages.
+- **Silent session-write failure** — a failed write on first creation is
+  discarded, so state can be lost without any message.
+- **Coverage reporting in CI** — not wired; `internal/telegram` and
+  `internal/agent` are the weakest packages.
+
+**Deliberately later**
+
+- Multiple concurrent agent sessions, plus `git worktree` support so two do not
+  fight over one directory
+- Automated build/test loops, `git status` inspection, PR workflows and automatic
+  artifact delivery — the agent-facing half of the roadmap
+- A systemd unit and a Windows service wrapper; both are a few lines of
+  template, both are unshipped
+- Retention count for rotated audit archives, a `state_file` key for
+  home-directory-less installs, an optional gateway mode
+- Scheduled tasks, a web dashboard, device management
+
+**Not planned**
+
+- Any hosted or multi-tenant mode. This is a single-operator tool: it runs as
+  your user account, on your machine, with your bot token. If you need an OS
+  sandbox around it, run it inside a VM or container — the process boundary is
+  the real one, and the workspace policy in
+  [Known limitations](#known-limitations) is not a substitute for it.
 
 ## Contributing
 
-`master` is **protected** — outside contributors go through a pull request. The
-repository owner is deliberately exempt from that requirement and can push
-straight to `master`, so a stale branch is never a reason to skip the checks.
+`master` is **protected**: outside contributors go through a pull request, and
+the repository owner is deliberately exempt so a stale branch is never a reason to
+skip the checks. CI runs `ubuntu-24.04` and `macos-latest` with `fail-fast:
+false`, and each job runs `gofmt` → `go build` → `go vet` → `go test -race
+-timeout 15m`, ordered cheapest first; `staticcheck` is pinned at `v0.8.1` and
+runs once, on the Linux job. Green in both is the bar for a pull request, though
+these are **not currently enforced as required status checks** and the ruleset has
+never actually gated a merge.
 
-CI runs two jobs, `ubuntu-24.04` and `macos-latest`. Each runs
-`gofmt` → `go build` → `go vet` → `go test -race`, and `staticcheck` runs once,
-on the Linux job. Green in both is the bar for anything arriving as a pull
-request; note that these are not currently enforced as required status checks,
-so a red run is possible on a pull request.
-
-The Linux label is pinned on purpose: these tests drive a real `zsh` over a PTY
-and read the terminal's line settings, so they are sensitive to what the runner
-image happens to ship. A deliberate version bump is a visible diff and a test
-failure to read, rather than a surprise one Tuesday.
+The Linux label is pinned to `ubuntu-24.04` rather than `ubuntu-latest`: these
+tests drive a real `zsh` over a PTY and read the terminal's line settings, so they
+are sensitive to what the runner image ships — enough that they broke on an image
+the local machine could not reproduce. `ubuntu-latest` moves from 24.04 to 26.04
+between 19 Oct and 19 Nov 2026, so bumping it should be a deliberate edit and a
+visible failure, not a surprise on a Tuesday. Windows is absent on purpose —
+`creack/pty` compiles there but `StartWithSize` returns `ErrUnsupported` at
+runtime, so every PTY test would fail on a runner that could never be made to
+pass.
 
 ## License
 

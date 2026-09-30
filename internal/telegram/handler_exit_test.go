@@ -28,7 +28,7 @@ func newExitHandler(t *testing.T, maxMsgLen int) (*Handler, string) {
 	}
 	h := NewHandler(Options{
 		Authorizer: security.New(testAgentOwner, []int64{testAgentOwner}),
-		Runner:     terminal.NewRunner("/bin/zsh", 20*time.Second, 1<<20),
+		Runner:     terminal.NewRunner("/bin/zsh", 1<<20),
 		Sessions:   session.NewManagerWithStateFile(filepath.Join(t.TempDir(), "state.json")),
 		Projects:   map[string]config.ProjectConfig{"app": {Path: t.TempDir()}},
 		MaxMsgLen:  maxMsgLen,

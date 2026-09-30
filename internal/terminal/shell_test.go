@@ -15,7 +15,7 @@ import (
 )
 
 func testRunner() *Runner {
-	return NewRunner("/bin/zsh", 10*time.Second, 1<<20)
+	return NewRunner("/bin/zsh", 1<<20)
 }
 
 func TestShellExecEcho(t *testing.T) {
@@ -493,7 +493,7 @@ func TestInterruptedCommandDoesNotBorrowEarlierOutput(t *testing.T) {
 // hardcoded DefaultRingBuffer. Raising the limit in the config did nothing, and
 // a command that outgrew 512 KiB lost the front of its own output.
 func TestMaxOutputBytesReachesTheCapture(t *testing.T) {
-	r := NewRunner("/bin/zsh", 30*time.Second, 4<<20)
+	r := NewRunner("/bin/zsh", 4<<20)
 	s, err := r.OpenShell("", nil)
 	if err != nil {
 		t.Fatalf("open shell: %v", err)
@@ -522,7 +522,7 @@ func TestMaxOutputBytesReachesTheCapture(t *testing.T) {
 // A small configured limit must not break the frame. It costs output, not
 // correctness: the stop marker is written last and always survives.
 func TestSmallMaxOutputStillReportsStatus(t *testing.T) {
-	r := NewRunner("/bin/zsh", 30*time.Second, 1)
+	r := NewRunner("/bin/zsh", 1)
 	s, err := r.OpenShell("", nil)
 	if err != nil {
 		t.Fatalf("open shell: %v", err)

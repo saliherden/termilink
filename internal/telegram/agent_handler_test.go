@@ -1381,7 +1381,7 @@ func TestCommandAfterExitStartsUnbound(t *testing.T) {
 	// only wires an agent, which is why the exit tests can close a shell that was
 	// never opened.
 	h := NewHandler(Options{
-		Runner:     terminal.NewRunner("/bin/zsh", 10*time.Second, 1<<20),
+		Runner:     terminal.NewRunner("/bin/zsh", 1<<20),
 		Projects:   map[string]config.ProjectConfig{"app": {Path: t.TempDir()}},
 		Authorizer: security.New(testAgentOwner, []int64{testAgentOwner}),
 	})

@@ -40,7 +40,7 @@ type linkHost struct {
 var linkHosts = map[string]linkHost{
 	"uguu.se": {
 		field:     "files[]",
-		retention: "≈3 saat sonra otomatik silinir",
+		retention: "auto-deleted after about 3 hours",
 		parse:     parseUguuResponse,
 	},
 	"catbox.moe": {

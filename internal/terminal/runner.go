@@ -1,9 +1,5 @@
 package terminal
 
-import (
-	"time"
-)
-
 type Result struct {
 	ExitCode int
 	Output   []byte
@@ -12,12 +8,15 @@ type Result struct {
 
 type Runner struct {
 	shell     string
-	timeout   time.Duration
 	maxOutput int
 }
 
-func NewRunner(shell string, timeout time.Duration, maxOutput int) *Runner {
-	return &Runner{shell: shell, timeout: timeout, maxOutput: maxOutput}
+// NewRunner opens persistent shells that live until they are closed, so there
+// is no per-command deadline to hold here: the timeout is enforced by the
+// caller as a context deadline around the run. A timeout field on the Runner
+// would only ever be a second, unread copy of that value.
+func NewRunner(shell string, maxOutput int) *Runner {
+	return &Runner{shell: shell, maxOutput: maxOutput}
 }
 
 func TruncateOutput(data []byte, maxBytes int) []byte {
