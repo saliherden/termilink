@@ -3,6 +3,8 @@ package terminal
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -33,8 +35,6 @@ const (
 	// giving up on getting the echo off.
 	setupAttempts = 3
 )
-
-var shellSeq uint64
 
 type ringBuffer struct {
 	mu   sync.Mutex
@@ -144,9 +144,24 @@ func prepareZDotDir() (string, error) {
 	return zdir, nil
 }
 
-func nextShellMarker() string {
-	seq := atomic.AddUint64(&shellSeq, 1)
-	return shellMarkerPrefix + "_" + strconv.Itoa(os.Getpid()) + "_" + strconv.FormatUint(seq, 10)
+// nextShellMarker returns the per-command marker that delimits a command's
+// output. It must be unpredictable: sliceFrame resolves the output by finding
+// the last start token before the end token, so a command that can predict the
+// marker can print a fake start token of its own and make everything printed
+// before it disappear from the report. The audit log records the command and
+// its status but not its output, so hidden lines leave no trace afterwards.
+//
+// The randomness comes from crypto/rand rather than a counter because a
+// predictable marker is the vulnerability, not a hardening opportunity. The
+// pid and a per-process counter were both readable by anything running inside
+// the session, and the counter only ever went up, so a command could derive
+// the marker of the command it was about to run.
+func nextShellMarker() (string, error) {
+	var b [16]byte
+	if _, err := cryptorand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate shell marker: %w", err)
+	}
+	return shellMarkerPrefix + "_" + hex.EncodeToString(b[:]), nil
 }
 
 // OpenShell spawns an interactive shell attached to a pseudo-terminal. The
@@ -225,7 +240,10 @@ func (r *Runner) OpenShell(dir string, env []string) (*Shell, error) {
 func (s *Shell) startShell() error {
 	deadline := time.Now().Add(shellOpenTimeout)
 	for attempt := 1; attempt <= setupAttempts; attempt++ {
-		marker := nextShellMarker()
+		marker, err := nextShellMarker()
+		if err != nil {
+			return err
+		}
 		// The marker is parked in a shell variable instead of being pasted
 		// into the echo argument, so the literal text "REQ_<marker>" never
 		// appears in the line being sent. Otherwise the PTY's echo of this
@@ -270,7 +288,11 @@ func (s *Shell) waitReady(marker string, deadline time.Time) error {
 // is on as well. The wait is for the prompt that follows the probe, not for
 // the probe's first appearance, because the echo arrives first.
 func (s *Shell) echoIsOn() (bool, error) {
-	probe := "tlprobe" + nextShellMarker()
+	marker, err := nextShellMarker()
+	if err != nil {
+		return false, err
+	}
+	probe := "tlprobe" + marker
 	if err := s.writeString("echo " + probe + "\n"); err != nil {
 		return false, err
 	}
@@ -500,7 +522,10 @@ func (s *Shell) Close() error {
 // shell and waits until the end marker is observed, the stop signal fires or
 // ctx is done. It returns the output between the markers.
 func (s *Shell) ExecCommand(ctx context.Context, command string) ([]byte, error) {
-	marker := nextShellMarker()
+	marker, err := nextShellMarker()
+	if err != nil {
+		return nil, err
+	}
 	startTok := "S_" + marker + "#"
 	stopTok := "E_" + marker + "#"
 	// TLM_RC captures the command's own status: $? is expanded while printf's

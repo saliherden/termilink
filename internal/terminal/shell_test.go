@@ -5,7 +5,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -126,6 +129,69 @@ func TestShellCwdIgnoresForgedMarker(t *testing.T) {
 	}
 }
 
+// A command that guesses the frame marker could hide part of its own output
+// from the report. sliceFrame takes the last start token before the end token,
+// so a forged start token planted in the command's own output wins over the
+// real one and silently drops everything printed before it. The audit log
+// records the command and its status but not its output, so the hidden lines
+// are not recoverable afterwards.
+//
+// This pins the property rather than the attack: the guess below is one
+// attempt, because pinning the counter it used to read is exactly the coupling
+// being removed. TestShellMarkerIsUnpredictable is what fails if the marker
+// goes back to being derived from the pid and a counter.
+func TestCommandCannotHideItsOwnOutput(t *testing.T) {
+	r := testRunner()
+	s, err := r.OpenShell("", nil)
+	if err != nil {
+		t.Fatalf("open shell: %v", err)
+	}
+	defer s.Close()
+
+	// Guess the way an attacker would. The marker used to be the pid plus a
+	// counter, both readable, so this is the shape that used to work.
+	forged := shellMarkerPrefix + "_" + strconv.Itoa(os.Getpid()) + "_1"
+	command := fmt.Sprintf("printf 'FIRST-LINE\\nS_%s#\\nE_%s#\\nAFTER-LINE\\n'", forged, forged)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := s.ExecCommand(ctx, command)
+	if err != nil {
+		t.Fatalf("exec: %v", err)
+	}
+	// The forged end token cannot truncate anything: the real one is written
+	// last, and the frame takes the last match.
+	if !bytes.Contains(out, []byte("AFTER-LINE")) {
+		t.Errorf("output truncated at the end: %q", out)
+	}
+	if !bytes.Contains(out, []byte("FIRST-LINE")) {
+		t.Errorf("output truncated at the start by a guessed frame token: %q", out)
+	}
+}
+
+// A fixed marker would be as forgeable as a predictable one, so the format is
+// pinned: the unpredictable part has to be hex, and long enough that guessing
+// it is not an option. crypto/rand.Text is deliberately not used here — it
+// discards its own error, so a broken entropy source would hand back a string
+// of zeroes and the marker would become predictable while looking random.
+func TestShellMarkerIsUnpredictable(t *testing.T) {
+	shape := regexp.MustCompile(`^` + shellMarkerPrefix + `_[0-9a-f]{32}$`)
+	seen := make(map[string]bool)
+	for i := 0; i < 32; i++ {
+		marker, err := nextShellMarker()
+		if err != nil {
+			t.Fatalf("marker: %v", err)
+		}
+		if !shape.MatchString(marker) {
+			t.Fatalf("marker %q is not %d hex characters after the prefix", marker, 32)
+		}
+		if seen[marker] {
+			t.Fatalf("marker %q was returned twice in %d draws", marker, i+1)
+		}
+		seen[marker] = true
+	}
+}
+
 func TestParsePWD(t *testing.T) {
 	cases := []struct {
 		name string
@@ -187,7 +253,11 @@ func TestShellPersistenceAcrossCommands(t *testing.T) {
 // sighting would read a single occurrence and pass while echo is on.
 func TestOpenShellTurnsEchoOff(t *testing.T) {
 	const attempts = 5
-	probe := "probe-" + nextShellMarker()
+	marker, err := nextShellMarker()
+	if err != nil {
+		t.Fatalf("marker: %v", err)
+	}
+	probe := "probe-" + marker
 
 	for i := 1; i <= attempts; i++ {
 		func() {
