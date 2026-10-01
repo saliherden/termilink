@@ -23,7 +23,7 @@ func NewRootCmd() *cobra.Command {
 		newStatusCmd(&configPath),
 		newConfigCmd(&configPath),
 		newProjectsCmd(&configPath),
-		newSessionsCmd(),
+		newSessionsCmd(&configPath),
 		newAuditCmd(&configPath),
 		newInitCmd(&configPath),
 	)

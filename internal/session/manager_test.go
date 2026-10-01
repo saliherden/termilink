@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -228,4 +229,42 @@ func TestSaveWithoutStateFileStaysQuiet(t *testing.T) {
 	if err := m.Save(); err != nil {
 		t.Fatalf("Save with no state file = %v, want nil", err)
 	}
+}
+
+func TestResolveStateFile(t *testing.T) {
+	t.Run("absolute override is used verbatim", func(t *testing.T) {
+		got, err := ResolveStateFile("/var/lib/termilink/state.json")
+		if err != nil {
+			t.Fatalf("ResolveStateFile: %v", err)
+		}
+		if got != "/var/lib/termilink/state.json" {
+			t.Fatalf("got %q", got)
+		}
+	})
+
+	t.Run("relative override is rejected", func(t *testing.T) {
+		// A relative path would resolve against whatever working directory
+		// the process started in. That is exactly the ambiguity a service
+		// install runs into, so it has to be an error rather than a guess.
+		got, err := ResolveStateFile("state.json")
+		if err == nil {
+			t.Fatalf("expected an error for a relative state_file, got %q", got)
+		}
+		if !strings.Contains(err.Error(), "absolute") {
+			t.Errorf("error should explain the problem, got %v", err)
+		}
+	})
+
+	t.Run("empty override falls back to the default", func(t *testing.T) {
+		got, err := ResolveStateFile("")
+		if err != nil {
+			t.Fatalf("ResolveStateFile: %v", err)
+		}
+		if want := DefaultStateFile(); got != want {
+			t.Fatalf("got %q, want the default %q", got, want)
+		}
+		if got == "" {
+			t.Fatal("empty override must resolve to a real path or an error, never \"\"")
+		}
+	})
 }

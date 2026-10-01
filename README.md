@@ -122,6 +122,7 @@ Every key, its type and its effective default:
 | `dangerous_patterns` | []string | none | extra regexes, OR-ed with the built-in list |
 | `audit_log` | string | `~/.termilink/audit.log` | absolute path, or `off` to disable auditing |
 | `audit_max_bytes` | int | `0` (unlimited) | past this, the file rotates to `<path>.1` before the next entry |
+| `audit_keep` | int | `1` | how many rotated archives to retain; below 1 is clamped to 1 |
 
 ### `workspace`
 
@@ -154,9 +155,24 @@ Every key, its type and its effective default:
 | `<name>.artifacts` | []string | — | paths collected by `get` |
 | `<name>.env` | map[string]string | — | exported into that project's shell; keys may not contain `=` or a newline, values no newline or NUL |
 
+### `state_file` (top level)
+
+| key | type | default | notes |
+| --- | --- | --- | --- |
+| `state_file` | string | `~/.termilink/state.json` | must be absolute; where persisted terminal sessions live |
+
 Validation is strict where a wrong value would fail silently: `shell` must be
-non-empty, `max_file_bytes` positive, `audit_max_bytes` non-negative, and the
-three enumerated fields accept only the values listed above.
+non-empty, `max_file_bytes` positive, `audit_max_bytes` and `audit_keep`
+non-negative, `state_file` absolute, and the three enumerated fields accept
+only the values listed above.
+
+Both file paths are resolved once, in the same place, for the running agent and
+for the `status` and `sessions` commands — so `termilink sessions` always reads
+the file the agent actually writes. When no path can be resolved at all (no home
+directory, nothing configured) the agent **refuses to start** rather than
+degrading to in-memory sessions, which would look healthy and forget everything
+on restart. `state_file` is what makes a service install work when the account
+it runs under has no usable home directory.
 
 ## Telegram Commands
 
@@ -484,6 +500,16 @@ the agent down — write errors are reported once to stderr and ignored.
 `security.audit_log: off` disables it entirely, and `audit_max_bytes` (default
 `0` = unlimited) rotates to `audit.log.1` once the file exceeds it.
 
+Rotation is generational, and the default retention is one archive. With
+`audit_keep: 5` a rotation moves `audit.log` to `audit.log.1`, shifts the
+existing archives up to `.5` and drops whatever was there — so the disk cost is
+bounded by roughly `audit_max_bytes × (audit_keep + 1)`. The default of `1`
+reproduces the older single-`.1` behaviour exactly, which means the log never
+held more than one cap's worth of history; an investigation that reached back
+further than that found the entry gone. Lowering the value clears the archives
+past the new count on the next rotation, and `termilink status` shows the
+resolved log path.
+
 Read recent entries with:
 
 ```bash
@@ -665,8 +691,8 @@ on a date.
   development. Deferred until the deployment is settled, but a real exposure.
 - **Coverage reporting in CI** — not wired. Overall coverage is 69%; `cmd/termilink`
   and `cmd/termilink/cli` have no tests at all (0%), and the thinnest covered
-  packages are `internal/instance` (67%), `internal/audit` (70%) and
-  `internal/agent` (70%).
+  packages are `internal/instance` (67%), `internal/agent` (70%) and
+  `internal/telegram` (71%).
 
 **Deliberately later**
 
@@ -674,8 +700,8 @@ on a date.
   when no agent session is open. Everything else on this list is either already
   here or a few lines of template.
 - **Service templates** — a systemd user unit and a Windows service wrapper.
-- **Audit retention and a `state_file` key** — how many rotated archives to keep,
-  and where sessions live on an install with no home directory.
+  `state_file` and `audit_keep` are already in place to support them, so this is
+  packaging rather than new behaviour.
 
 **Not planned**
 

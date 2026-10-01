@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
 
@@ -48,10 +47,12 @@ func New(cfg *config.Config, logger *slog.Logger) (*Service, error) {
 	// Manager.Save is a no-op without a state file, so an unresolvable home
 	// would start a gateway that looks healthy and forgets every session on
 	// restart. The audit log already refuses to start in that case; this keeps
-	// the session state from being the one silent exception.
-	stateFile := session.DefaultStateFile()
-	if stateFile == "" {
-		return nil, errors.New("resolve session state file: no home directory")
+	// the session state from being the one silent exception. state_file in the
+	// config is what makes this work under a service account that has no
+	// usable home directory.
+	stateFile, err := session.ResolveStateFile(cfg.StateFile)
+	if err != nil {
+		return nil, fmt.Errorf("resolve session state file: %w", err)
 	}
 	sessions := session.NewManagerWithStateFile(stateFile)
 
@@ -107,6 +108,7 @@ func (s *Service) Run(ctx context.Context) error {
 		"projects", len(s.cfg.Projects),
 		"shell", s.cfg.Terminal.Shell,
 		"audit", s.auditPath(),
+		"state", s.sessions.StateFile(),
 	)
 	defer s.handler.Close()
 	s.bot.Start(ctx)
@@ -129,8 +131,9 @@ func (s *Service) auditPath() string {
 // newAuditLogger builds the audit logger from config. An empty audit_log
 // resolves to the default location; "off" disables auditing (nil logger).
 func newAuditLogger(cfg *config.Config) (*audit.Logger, error) {
-	if cfg.Security.AuditLog == "off" {
+	path, enabled := audit.PathFor(cfg.Security.AuditLog)
+	if !enabled {
 		return nil, nil
 	}
-	return audit.OpenWithMax(cfg.Security.AuditLog, cfg.Security.AuditMaxBytes)
+	return audit.OpenWithOptions(path, cfg.Security.AuditMaxBytes, cfg.Security.AuditKeep)
 }

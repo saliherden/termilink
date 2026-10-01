@@ -152,6 +152,62 @@ terminal:
 	}
 }
 
+func TestLoadRejectsBadAuditKeep(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+  audit_keep: -2
+terminal:
+  shell: /bin/zsh
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("negative audit_keep must be rejected rather than silently clamped")
+	}
+}
+
+func TestLoadRejectsRelativeStateFile(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+state_file: state.json
+terminal:
+  shell: /bin/zsh
+`)
+	if _, err := Load(path); err == nil {
+		t.Fatal("a relative state_file must be rejected: it would resolve against the process working directory")
+	}
+}
+
+func TestLoadAcceptsAbsoluteStateFileAndAuditKeep(t *testing.T) {
+	t.Setenv("TELEGRAM_BOT_TOKEN", "t")
+	path := writeConfig(t, `
+telegram:
+  bot_token: t
+security:
+  allowed_users: [1]
+  audit_keep: 7
+state_file: /var/lib/termilink/state.json
+terminal:
+  shell: /bin/zsh
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.StateFile != "/var/lib/termilink/state.json" {
+		t.Errorf("StateFile = %q", cfg.StateFile)
+	}
+	if cfg.Security.AuditKeep != 7 {
+		t.Errorf("AuditKeep = %d", cfg.Security.AuditKeep)
+	}
+}
+
 func TestLoadRejectsMissingToken(t *testing.T) {
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	path := writeConfig(t, `

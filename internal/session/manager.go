@@ -2,18 +2,45 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
 )
 
+// DefaultStateFile returns the default session state location
+// (~/.termilink/state.json), or "" when there is no usable home directory.
+// Prefer ResolveStateFile: an empty result is silently ignored by
+// Manager.Save, which keeps sessions in memory, so a caller that skips the
+// check starts an agent that looks healthy and forgets everything on restart.
 func DefaultStateFile() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		return ""
 	}
 	return filepath.Join(home, ".termilink", "state.json")
+}
+
+// ResolveStateFile returns the state file to use, preferring an explicit
+// override over the home-directory default. The override must be an absolute
+// path; relative paths are rejected rather than resolved against the process
+// working directory, which is not a meaningful base for a service. The error
+// is returned instead of an empty string so a misconfiguration surfaces at
+// startup instead of degrading into lost sessions.
+func ResolveStateFile(override string) (string, error) {
+	if override != "" {
+		if !filepath.IsAbs(override) {
+			return "", fmt.Errorf("state_file must be an absolute path (got %q)", override)
+		}
+		return override, nil
+	}
+	path := DefaultStateFile()
+	if path == "" {
+		return "", errors.New("no home directory; set state_file to an absolute path")
+	}
+	return path, nil
 }
 
 type State struct {
@@ -58,6 +85,10 @@ func (m *Manager) IsActive(id string) bool {
 func NewManager() *Manager {
 	return &Manager{sessions: map[string]*State{}, active: map[string]bool{}}
 }
+
+// StateFile returns the resolved path sessions are persisted to, or "" when
+// they are kept in memory only.
+func (m *Manager) StateFile() string { return m.stateFile }
 
 func NewManagerWithStateFile(path string) *Manager {
 	m := NewManager()

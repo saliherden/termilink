@@ -46,6 +46,18 @@ security:
   # "<path>.1" before the next entry once it grows past this. 0 = unlimited.
   # audit_max_bytes: 26214400   # 25 MiB
 
+  # Optional: how many rotated archives to keep. 1 (the default) replaces
+  # ".1" on every rotation, so the log never holds more than one cap's worth of
+  # history; higher values keep ".1", ".2", ... so an investigation can reach
+  # back further. Lowering this clears the archives past the new count.
+  # audit_keep: 5
+
+# Optional: where persisted terminal sessions live. Empty = default
+# ~/.termilink/state.json. Must be absolute. Set this when running under a
+# service account that has no usable home directory, otherwise the agent
+# refuses to start rather than silently keeping sessions in memory.
+# state_file: /var/lib/termilink/state.json
+
 workspace:
   # Optional: restrict filesystem access to these roots.
   allowed:

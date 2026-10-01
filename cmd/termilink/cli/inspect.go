@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"gopkg.in/yaml.v3"
 
+	"github.com/saliherden/termilink/internal/audit"
 	"github.com/saliherden/termilink/internal/config"
 	"github.com/saliherden/termilink/internal/session"
 	"github.com/saliherden/termilink/internal/version"
@@ -28,6 +29,21 @@ func masked(cfg *config.Config) *config.Config {
 	return &cp
 }
 
+// describeAuditLog renders the audit log location for the status command,
+// spelling out the two cases a bare path would hide: auditing turned off, and
+// a default location that could not be resolved.
+func describeAuditLog(cfg *config.Config) string {
+	path, enabled := audit.PathFor(cfg.Security.AuditLog)
+	switch {
+	case !enabled:
+		return "off"
+	case path == "":
+		return "(unresolved: no home directory; set security.audit_log)"
+	default:
+		return path
+	}
+}
+
 func newStatusCmd(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
@@ -43,6 +59,12 @@ func newStatusCmd(configPath *string) *cobra.Command {
 			fmt.Printf("Projects:       %d\n", len(cfg.Projects))
 			fmt.Printf("Shell:          %s\n", cfg.Terminal.Shell)
 			fmt.Printf("Command timeout: %s\n", cfg.Terminal.CommandTimeout.Std())
+			if path, err := session.ResolveStateFile(cfg.StateFile); err == nil {
+				fmt.Printf("State file:     %s\n", path)
+			} else {
+				fmt.Printf("State file:     (unresolved: %v)\n", err)
+			}
+			fmt.Printf("Audit log:      %s\n", describeAuditLog(cfg))
 			return nil
 		},
 	}
@@ -94,12 +116,23 @@ func newProjectsCmd(configPath *string) *cobra.Command {
 	}
 }
 
-func newSessionsCmd() *cobra.Command {
+func newSessionsCmd(configPath *string) *cobra.Command {
 	return &cobra.Command{
 		Use:   "sessions",
 		Short: "list persisted terminal sessions",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			path := session.DefaultStateFile()
+			cfg, err := loadConfig(*configPath)
+			if err != nil {
+				return err
+			}
+			// Resolve through the config so an install with state_file set
+			// reads the file the running agent actually writes, and a
+			// misconfigured path reports the same error here as at startup
+			// instead of quietly looking at the default.
+			path, err := session.ResolveStateFile(cfg.StateFile)
+			if err != nil {
+				return err
+			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				if os.IsNotExist(err) {

@@ -174,3 +174,258 @@ func toLines(data []byte) []string {
 	}
 	return strings.Split(s, "\n")
 }
+
+// writeFile creates a file holding exactly the given contents, so tests can
+// seed a rotation chain with distinguishable generations.
+func writeFile(t *testing.T, path, contents string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
+		t.Fatalf("seed %s: %v", path, err)
+	}
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(data)
+}
+
+func TestShiftArchivesMovesGenerationsUpInOrder(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	l, err := OpenWithOptions(path, 0, 3)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer l.Close()
+
+	// Stand in for a log that has already rotated twice: .1 is the newer
+	// generation, .2 the older one.
+	writeFile(t, path, "gen3")
+	writeFile(t, path+".1", "gen2")
+	writeFile(t, path+".2", "gen1")
+
+	l.shiftArchives()
+
+	// Each generation moves exactly one slot up. If this shifted in the wrong
+	// direction, or overwrote instead of renaming, .2 would still read "gen1"
+	// and the newest history would be silently lost.
+	for _, tc := range []struct{ name, want string }{
+		{".1", "gen3"},
+		{".2", "gen2"},
+		{".3", "gen1"},
+	} {
+		if got := readFile(t, path+tc.name); got != tc.want {
+			t.Errorf("archive %s = %q, want %q", tc.name, got, tc.want)
+		}
+	}
+	if _, err := os.Stat(path + ".4"); !os.IsNotExist(err) {
+		t.Errorf("archive .4 exists with keep=3")
+	}
+	// The caller reopens a fresh log after the shift, so the old one must be
+	// gone rather than left behind to be appended to again.
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("current log still present after shift")
+	}
+}
+
+func TestShiftArchivesDropsOldestWhenFull(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	l, err := OpenWithOptions(path, 0, 2)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer l.Close()
+
+	// A full chain: .2 is about to fall off the end.
+	writeFile(t, path, "gen3")
+	writeFile(t, path+".1", "gen2")
+	writeFile(t, path+".2", "gen1")
+	writeFile(t, path+".3", "gen0")
+
+	l.shiftArchives()
+
+	if got := readFile(t, path+".1"); got != "gen3" {
+		t.Errorf(".1 = %q, want gen3", got)
+	}
+	if got := readFile(t, path+".2"); got != "gen2" {
+		t.Errorf(".2 = %q, want gen2", got)
+	}
+	for _, name := range []string{".3", ".4"} {
+		if _, err := os.Stat(path + name); !os.IsNotExist(err) {
+			t.Errorf("archive %s should have been dropped (keep=2)", name)
+		}
+	}
+}
+
+func TestShiftArchivesToleratesGaps(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+	l, err := OpenWithOptions(path, 0, 3)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	defer l.Close()
+
+	// .1 is missing, as it would be if an operator cleaned it up by hand. A
+	// missing archive is not an error: the remaining one has to move up rather
+	// than being left in a slot the new .1 is about to take, and the index
+	// encodes age, so it lands at .3 with .2 left as a hole.
+	writeFile(t, path, "gen3")
+	writeFile(t, path+".2", "gen1")
+
+	l.shiftArchives()
+
+	if got := readFile(t, path+".1"); got != "gen3" {
+		t.Errorf(".1 = %q, want gen3", got)
+	}
+	if got := readFile(t, path+".3"); got != "gen1" {
+		t.Errorf(".3 = %q, want gen1 (the survivor must move up, not be dropped)", got)
+	}
+	if _, err := os.Stat(path + ".2"); !os.IsNotExist(err) {
+		t.Errorf(".2 should stay a hole rather than being backfilled")
+	}
+}
+
+func TestLoweringRetentionClearsLeftoverArchives(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "audit.log")
+
+	// Fill a chain the way a previous run with a higher audit_keep would have.
+	full, err := OpenWithOptions(path, 0, 4)
+	if err != nil {
+		t.Fatalf("OpenWithOptions: %v", err)
+	}
+	writeFile(t, path, "gen5")
+	writeFile(t, path+".1", "gen4")
+	writeFile(t, path+".2", "gen3")
+	writeFile(t, path+".3", "gen2")
+	writeFile(t, path+".4", "gen1")
+	full.shiftArchives()
+
+	// Now the operator lowers the setting to two and the next rotation happens.
+	full.keep = 2
+	writeFile(t, path, "gen6")
+	full.shiftArchives()
+
+	if got := readFile(t, path+".1"); got != "gen6" {
+		t.Errorf(".1 = %q, want gen6", got)
+	}
+	if got := readFile(t, path+".2"); got != "gen5" {
+		t.Errorf(".2 = %q, want gen5", got)
+	}
+	// Archives past the new count must be cleaned up, not just ignored: with
+	// only the ".<keep>" slot deleted they would sit on disk forever because no
+	// later shift ever looks that far.
+	for _, name := range []string{".3", ".4", ".5"} {
+		if _, err := os.Stat(path + name); !os.IsNotExist(err) {
+			t.Errorf("archive %s should have been cleared after lowering retention", name)
+		}
+	}
+}
+
+func TestRetentionKeepsMoreHistoryThanASingleArchive(t *testing.T) {
+	// Same workload, two retention settings. Before audit_keep existed both
+	// runs behaved identically, so a setting that silently did nothing would
+	// still pass a test that only checked the chain existed.
+	run := func(keep int) (path string, current, archived int) {
+		dir := t.TempDir()
+		path = filepath.Join(dir, "audit.log")
+		l, err := OpenWithOptions(path, 400, keep)
+		if err != nil {
+			t.Fatalf("OpenWithOptions(keep=%d): %v", keep, err)
+		}
+		defer l.Close()
+		for i := 0; i < 80; i++ {
+			l.Audit(Entry{Action: ActionCommand, Cmd: fmt.Sprintf("entry-%03d", i), UserID: 1})
+		}
+		count := func(name string) int {
+			data, err := os.ReadFile(name)
+			if err != nil {
+				return 0
+			}
+			return len(toLines(data))
+		}
+		for i := 1; i <= keep; i++ {
+			archived += count(fmt.Sprintf("%s.%d", path, i))
+		}
+		return path, count(path), archived
+	}
+
+	singlePath, _, singleArchived := run(1)
+	manyPath, manyCurrent, manyArchived := run(3)
+
+	if manyArchived <= singleArchived {
+		t.Errorf("keep=3 archived %d entries, keep=1 archived %d; retention is not retaining more",
+			manyArchived, singleArchived)
+	}
+	// The current log is bounded by the cap in both runs; only the archive
+	// side should differ.
+	if manyCurrent > 400+1024 {
+		t.Errorf("current log %d bytes far exceeds cap 400", manyCurrent)
+	}
+	if _, err := os.Stat(manyPath + ".4"); !os.IsNotExist(err) {
+		t.Errorf("archive .4 exists with keep=3")
+	}
+	if _, err := os.Stat(singlePath + ".2"); !os.IsNotExist(err) {
+		t.Errorf("archive .2 exists with keep=1")
+	}
+}
+
+func TestKeepBelowOneIsClampedToASingleArchive(t *testing.T) {
+	for _, keep := range []int{0, -1, -99} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "audit.log")
+		l, err := OpenWithOptions(path, 300, keep)
+		if err != nil {
+			t.Fatalf("OpenWithOptions(keep=%d): %v", keep, err)
+		}
+		for i := 0; i < 30; i++ {
+			l.Audit(Entry{Action: ActionCommand, Cmd: fmt.Sprintf("e-%d", i), UserID: 1})
+		}
+		l.Close()
+
+		if _, err := os.Stat(path + ".1"); err != nil {
+			t.Errorf("keep=%d: .1 missing after rotation: %v", keep, err)
+		}
+		if _, err := os.Stat(path + ".2"); !os.IsNotExist(err) {
+			t.Errorf("keep=%d: .2 exists, want clamped to a single archive", keep)
+		}
+	}
+}
+
+func TestPathFor(t *testing.T) {
+	t.Run("off disables auditing", func(t *testing.T) {
+		path, enabled := PathFor("off")
+		if enabled {
+			t.Error("enabled = true for \"off\"")
+		}
+		if path != "" {
+			t.Errorf("path = %q, want empty", path)
+		}
+	})
+
+	t.Run("explicit path wins", func(t *testing.T) {
+		path, enabled := PathFor("/var/log/termilink/audit.log")
+		if !enabled {
+			t.Error("enabled = false for an explicit path")
+		}
+		if path != "/var/log/termilink/audit.log" {
+			t.Errorf("path = %q", path)
+		}
+	})
+
+	t.Run("empty resolves to the default", func(t *testing.T) {
+		path, enabled := PathFor("")
+		if !enabled {
+			t.Error("an empty value must not silently disable auditing")
+		}
+		if want := DefaultPath(); path != want {
+			t.Errorf("path = %q, want the default %q", path, want)
+		}
+	})
+}

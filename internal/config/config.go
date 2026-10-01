@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -38,6 +39,13 @@ type Config struct {
 	Agent     AgentConfig              `yaml:"agent"`
 	Projects  map[string]ProjectConfig `yaml:"projects"`
 
+	// StateFile overrides where persisted terminal sessions live. Empty uses
+	// the default (~/.termilink/state.json). It must be an absolute path: a
+	// relative one would resolve against whatever working directory the process
+	// happened to be started in, which is exactly the ambiguity a service
+	// install runs into.
+	StateFile string `yaml:"state_file,omitempty"`
+
 	// Path of the loaded configuration file. Not serialized.
 	Path string `yaml:"-"`
 }
@@ -67,6 +75,11 @@ type SecurityConfig struct {
 	// AuditMaxBytes caps the audit log size in bytes; when exceeded the file
 	// is rotated to "<path>.1" before the next entry. 0 = unlimited.
 	AuditMaxBytes int64 `yaml:"audit_max_bytes"`
+	// AuditKeep is how many rotated archives to retain. 1 (the default, and
+	// the behaviour before this key existed) replaces ".1" on every rotation,
+	// so the log never holds more than one cap's worth of history. Values
+	// below 1 are clamped to 1.
+	AuditKeep int `yaml:"audit_keep"`
 }
 
 type WorkspaceConfig struct {
@@ -186,6 +199,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Security.AuditMaxBytes < 0 {
 		return fmt.Errorf("security.audit_max_bytes must be >= 0 (0 = unlimited)")
+	}
+	if c.Security.AuditKeep < 0 {
+		return fmt.Errorf("security.audit_keep must be >= 0 (0 or 1 keeps a single archive)")
+	}
+	if c.StateFile != "" && !filepath.IsAbs(c.StateFile) {
+		return fmt.Errorf("state_file must be an absolute path (got %q)", c.StateFile)
 	}
 	for name, p := range c.Projects {
 		for k, v := range p.Env {
