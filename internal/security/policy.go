@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // ApprovalMode controls which chat messages trigger the dangerous-command
@@ -26,7 +27,11 @@ var builtinDanger = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)(^|[;&|]\s*)sudo\s+`),
 	regexp.MustCompile(`:\s*\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;`),
 	regexp.MustCompile(`(?i)\bchown\s+[^/|&;]{1,80}/(?:\s|$)|\bchmod\s+(-R\s+)?[0-7]{3,4}\s+/`),
-	regexp.MustCompile(`(?i)>+\s*=/dev/\S+|(?i)>>?\s*/dev/\S+`),
+	// The leading (?i) already covers the second alternative, so repeating it
+	// there was redundant rather than scoping. What actually let device writes
+	// through is that neither alternative allowed whitespace after `=`, so
+	// `>= /dev/sda` was not gated while `>=/dev/sda` was.
+	regexp.MustCompile(`(?i)>+\s*=\s*/dev/\S+|>>?\s*/dev/\S+`),
 }
 
 // Policy bundles the approval gate and workspace scope that the Telegram
@@ -115,6 +120,9 @@ func cleanRoots(roots []string) []string {
 	return out
 }
 
+// under reports whether path is root or lives beneath it. It is purely lexical:
+// it does not resolve symlinks, so a symlink inside an allowed root pointing
+// outside still passes. See Known limitations in the README.
 func under(root, path string) bool {
 	rel, err := filepath.Rel(root, path)
 	if err != nil {
@@ -123,5 +131,11 @@ func under(root, path string) bool {
 	if rel == "." {
 		return true
 	}
-	return len(rel) >= 2 && rel[0] != '.' && rel[1] != '.'
+	// Reject only a genuine "..", not any relative path that happens to start
+	// with a dot. The previous len>=2 plus two-character test also rejected
+	// every single-character child (`allowed/x`) and every path whose second
+	// character was a dot — which meant an allowed root's own `.git/config` and
+	// `.config` read as out of scope, so the policy denied access to the very
+	// project it was configured to allow.
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }

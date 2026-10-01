@@ -57,6 +57,19 @@ func TestBuiltinDangerMatches(t *testing.T) {
 		"ls; sudo whoami":                   true,
 		":(){ :|:& };:":                     true,
 		"chown -R root:root /":              true,
+		// Device writes, in the shapes a shell actually accepts. ">= /dev/sda"
+		// is the regression: the pattern had no whitespace tolerance after "=",
+		// so this spaced form skipped the gate entirely while the unspaced one
+		// was caught — a fail-open hole in a fail-closed check.
+		">= /dev/sda":                true,
+		">=  /dev/sda":               true,
+		">=/dev/sda":                 true,
+		"tee /dev/stdout > /dev/sda": true,
+		"> /dev/sda":                 true,
+		">>/dev/sda":                 true,
+		"2> /dev/sda":                true,
+		"echo hi > /tmp/out":         false,
+		"echo hi > /tmp/a.conf":      false,
 	}
 	p, _ := NewPolicy("", nil, nil)
 	for raw, want := range cases {
@@ -93,5 +106,42 @@ func TestInWorkspace(t *testing.T) {
 	empty, _ := NewPolicy("", nil, nil)
 	if !empty.InWorkspace("/anywhere") {
 		t.Fatal("empty workspace must be permissive")
+	}
+}
+
+// TestInWorkspaceAcceptsDotAndShortNames pins the paths the old len>=2 plus
+// two-character test threw away. Each of these is inside the configured root, so
+// treating it as out of scope denied the owner access to their own project —
+// .git/config and .config being the ones that matter in practice, since a
+// developer runs git inside an allowed root.
+func TestInWorkspaceAcceptsDotAndShortNames(t *testing.T) {
+	p, _ := NewPolicy("", nil, []string{"/Users/s/projects"})
+	inside := []string{
+		"/Users/s/projects/x",           // single-character child
+		"/Users/s/projects/a",           // single-character child
+		"/Users/s/projects/.env",        // leading dot
+		"/Users/s/projects/a.conf",      // dot as the second character
+		"/Users/s/projects/.git/config", // the project's own git directory
+		"/Users/s/projects/.config/app", // a dotted config directory
+		"/Users/s/projects/x/y/z",       // single-character first component
+		"/Users/s/projects/...",         // a name that merely starts with dots
+		"/Users/s/projects/.hidden/dir", // dot-prefixed directory
+	}
+	for _, path := range inside {
+		if !p.InWorkspace(path) {
+			t.Errorf("InWorkspace(%q) = false, want true: it is inside the root", path)
+		}
+	}
+	// The escapes have to survive the looser test, or the policy is not a policy.
+	outside := []string{
+		"/Users/s/projects/../secrets",           // climbs out with ..
+		"/Users/s/projects/mobile/../../secrets", // climbs out from deeper down
+		"/Users/s/other/x",                       // a different directory entirely
+		"/etc/passwd",
+	}
+	for _, path := range outside {
+		if p.InWorkspace(path) {
+			t.Errorf("InWorkspace(%q) = true, want false: it escapes the root", path)
+		}
 	}
 }

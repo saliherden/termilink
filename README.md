@@ -656,31 +656,52 @@ is recorded there and the gateway is still running.
 Ordered by what is actually queued, not by wish list. Nothing here is promised
 on a date.
 
-**Next up**
+**Next up** — these need you, not the code
 
 - **Second-user verification** — the worker path has never been exercised with a
   real second Telegram account, which is also the only thing that would prove the
   branch ruleset gates anything.
 - **Bot token rotation** — the token in use was shared in chat during
   development. Deferred until the deployment is settled, but a real exposure.
-- **Coverage reporting in CI** — not wired; `internal/telegram` and
-  `internal/agent` are the weakest packages.
+- **Coverage reporting in CI** — not wired. Overall coverage is 69%; `cmd/termilink`
+  and `cmd/termilink/cli` have no tests at all (0%), and the thinnest covered
+  packages are `internal/instance` (67%), `internal/audit` (70%) and
+  `internal/agent` (70%).
 
 **Deliberately later**
 
-- Multiple concurrent agent sessions, plus `git worktree` support so two do not
-  fight over one directory
-- Automated build/test loops, `git status` inspection, PR workflows and automatic
-  artifact delivery — the agent-facing half of the roadmap
-- A systemd unit and a Windows service wrapper; both are a few lines of
-  template, both are unshipped
-- Retention count for rotated audit archives, a `state_file` key for
-  home-directory-less installs, an optional gateway mode
-- Scheduled tasks, a web dashboard, device management
+- **Scheduled tasks** — the one thing the agent CLIs cannot do: a job that runs
+  when no agent session is open. Everything else on this list is either already
+  here or a few lines of template.
+- **Service templates** — a systemd user unit and a Windows service wrapper.
+- **Audit retention and a `state_file` key** — how many rotated archives to keep,
+  and where sessions live on an install with no home directory.
 
 **Not planned**
 
-- Any hosted or multi-tenant mode. This is a single-operator tool: it runs as
+Each of these was queued once. The reason it came off is kept here so it does not
+get re-proposed:
+
+- **Multiple concurrent agent sessions.** The agent CLIs already persist their own
+  sessions per working directory, so `/project` and `cd` are the switch you
+  actually want. A second TermiLink-side session would duplicate what the agent
+  already does, and two screen relays would interleave in one chat. Rate limits
+  are not the reason — the live relay edits a single message rather than posting
+  one per frame, so it costs one message per session no matter how long it runs.
+- **Git worktree support.** It exists to keep concurrent sessions off each other's
+  files. With one session per chat there is nothing to isolate.
+- **Automated build/test loops, `git status` inspection, PR workflows.** The agent
+  has a shell: it runs `npm test`, reads `git status` and calls `gh pr create` on
+  its own. A Telegram command for each would be a worse version of a tool the
+  agent already has. `get` already delivers build artifacts, so that half shipped.
+- **Gateway mode and device management.** TermiLink stays on one machine, which is
+  also the security argument: a leaked bot token reaches the one machine TermiLink
+  runs on, but behind a gateway the same token reaches every machine you have
+  connected. A bad trade for one chat instead of two.
+- **Web dashboard.** One operator, one machine, and Telegram is the interface that
+  already works. A dashboard is a second interface to build, secure and test, in
+  order to show you data you can already read.
+- **Any hosted or multi-tenant mode.** This is a single-operator tool: it runs as
   your user account, on your machine, with your bot token. If you need an OS
   sandbox around it, run it inside a VM or container — the process boundary is
   the real one, and the workspace policy in
