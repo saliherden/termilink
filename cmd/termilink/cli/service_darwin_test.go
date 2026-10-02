@@ -49,8 +49,8 @@ func TestLaunchdRendererPathsAvoidTmp(t *testing.T) {
 	if want := filepath.Join("Library", "Logs", "termilink"); !strings.HasSuffix(paths.LogDir, want) {
 		t.Errorf("LogDir = %q, want it to end in %q", paths.LogDir, want)
 	}
-	if !strings.HasSuffix(paths.Plist, "Library/LaunchAgents/"+servicedef.DefaultLabel+".plist") {
-		t.Errorf("Plist = %q, want a LaunchAgents plist for the default label", paths.Plist)
+	if !strings.HasSuffix(paths.Definition, "Library/LaunchAgents/"+servicedef.DefaultLabel+".plist") {
+		t.Errorf("Plist = %q, want a LaunchAgents plist for the default label", paths.Definition)
 	}
 	if paths.LogStdout == paths.LogStderr {
 		t.Error("the two streams share a file, so they cannot be read apart")

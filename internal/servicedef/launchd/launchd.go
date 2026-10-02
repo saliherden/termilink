@@ -47,11 +47,11 @@ const LogProductDir = "termilink"
 func LogPaths(home, label string) servicedef.Paths {
 	dir := filepath.Join(home, "Library", "Logs", LogProductDir)
 	return servicedef.Paths{
-		Plist:     PlistPath(home, label),
-		LogDir:    dir,
-		LogStdout: filepath.Join(dir, "stdout.log"),
-		LogStderr: filepath.Join(dir, "stderr.log"),
-		User:      currentUser(),
+		Definition: PlistPath(home, label),
+		LogDir:     dir,
+		LogStdout:  filepath.Join(dir, "stdout.log"),
+		LogStderr:  filepath.Join(dir, "stderr.log"),
+		User:       currentUser(),
 	}
 }
 
@@ -89,7 +89,7 @@ func Render(svc *servicedef.Service, paths servicedef.Paths) ([]byte, error) {
 	if err := svc.Validate(); err != nil {
 		return nil, err
 	}
-	if paths.Plist == "" {
+	if paths.Definition == "" {
 		return nil, fmt.Errorf("launchd: no plist path given")
 	}
 	if paths.LogStdout == "" || paths.LogStderr == "" {

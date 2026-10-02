@@ -48,8 +48,8 @@ func (launchdRenderer) render(svc *servicedef.Service, paths servicedef.Paths) (
 // to be in place first; and the agent must not be left registered but unloaded
 // if writing fails, so a partially written file is removed before returning.
 func (launchdRenderer) install(svc *servicedef.Service, paths servicedef.Paths) error {
-	if err := os.MkdirAll(filepath.Dir(paths.Plist), 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Dir(paths.Plist), err)
+	if err := os.MkdirAll(filepath.Dir(paths.Definition), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(paths.Definition), err)
 	}
 	if err := os.MkdirAll(paths.LogDir, 0o700); err != nil {
 		return fmt.Errorf("create the log directory %s: %w", paths.LogDir, err)
@@ -62,8 +62,8 @@ func (launchdRenderer) install(svc *servicedef.Service, paths servicedef.Paths) 
 	// 0644, not 0600: launchd reads the plist as the user, and a plist in
 	// ~/Library/LaunchAgents is not a secret. It carries no token — the bot
 	// token stays in config.yaml or a 0600 .env next to it.
-	if err := os.WriteFile(paths.Plist, def, 0o644); err != nil {
-		return fmt.Errorf("write %s: %w", paths.Plist, err)
+	if err := os.WriteFile(paths.Definition, def, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", paths.Definition, err)
 	}
 
 	// bootout first, and ignore the error: a job that is already loaded is
@@ -74,11 +74,11 @@ func (launchdRenderer) install(svc *servicedef.Service, paths servicedef.Paths) 
 	if err := serviceBootstrap(svc, paths); err != nil {
 		// Do not leave a plist that no supervisor knows about — the next
 		// install would then have to guess whether it is active.
-		_ = os.Remove(paths.Plist)
+		_ = os.Remove(paths.Definition)
 		return err
 	}
 
-	fmt.Printf("Installed %s\n", paths.Plist)
+	fmt.Printf("Installed %s\n", paths.Definition)
 	fmt.Printf("Logs:   %s\n", paths.LogDir)
 	fmt.Printf("Status: termilink service status\n")
 	return nil
@@ -89,29 +89,29 @@ func (launchdRenderer) install(svc *servicedef.Service, paths servicedef.Paths) 
 // service should not be the thing that destroys the record.
 func (launchdRenderer) uninstall(svc *servicedef.Service, paths servicedef.Paths) error {
 	stopped := serviceBootout(svc, paths)
-	if err := os.Remove(paths.Plist); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove %s: %w", paths.Plist, err)
+	if err := os.Remove(paths.Definition); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove %s: %w", paths.Definition, err)
 	}
 	if stopped != nil {
 		// The file is gone, which is what the user asked for; report the
 		// supervisor problem rather than failing the whole command.
 		fmt.Fprintf(os.Stderr, "warning: could not unload the running job: %v\n", stopped)
 	}
-	fmt.Printf("Removed %s\n", paths.Plist)
+	fmt.Printf("Removed %s\n", paths.Definition)
 	fmt.Printf("Logs left in %s\n", paths.LogDir)
 	return nil
 }
 
 // serviceStatus reports whether the job is registered and what it is doing.
 func (launchdRenderer) status(svc *servicedef.Service, paths servicedef.Paths) error {
-	if _, err := os.Stat(paths.Plist); err != nil {
+	if _, err := os.Stat(paths.Definition); err != nil {
 		if os.IsNotExist(err) {
 			fmt.Println("Not installed (no plist).")
 			return nil
 		}
-		return fmt.Errorf("stat %s: %w", paths.Plist, err)
+		return fmt.Errorf("stat %s: %w", paths.Definition, err)
 	}
-	fmt.Printf("Installed: %s\n", paths.Plist)
+	fmt.Printf("Installed: %s\n", paths.Definition)
 
 	out, err := servicePrint(svc)
 	if err != nil {
@@ -134,7 +134,7 @@ func (launchdRenderer) status(svc *servicedef.Service, paths servicedef.Paths) e
 // why the error from the modern form points at a missing path rather than a
 // missing domain.
 func serviceBootstrap(svc *servicedef.Service, paths servicedef.Paths) error {
-	cmd := serviceCommand("bootstrap", "gui/"+strconv.Itoa(os.Getuid()), paths.Plist)
+	cmd := serviceCommand("bootstrap", "gui/"+strconv.Itoa(os.Getuid()), paths.Definition)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("launchctl bootstrap: %w\n%s", err, out)
 	}

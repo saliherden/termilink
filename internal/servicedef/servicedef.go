@@ -72,8 +72,11 @@ type Service struct {
 // needs a directory for the wrapper script. Keeping this separate from
 // Service is what lets the same description render everywhere.
 type Paths struct {
-	// Plist is the absolute path of the generated definition file.
-	Plist string
+	// Definition is the absolute path of the generated definition file: a
+	// launchd plist, a systemd unit, or whatever the platform's supervisor
+	// reads. Named for the role rather than the format, because the same
+	// field is a plist on one platform and a unit file on another.
+	Definition string
 	// LogDir is the absolute directory for stdout and stderr.
 	LogDir string
 	// LogStdout and LogStderr are the absolute file paths for each stream.

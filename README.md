@@ -72,12 +72,14 @@ Install zsh (`apt install zsh`) or point that one line at your own shell.
 | platform | status | notes |
 | --- | --- | --- |
 | macOS | supported | CI-tested; `termilink service install` generates and loads a launchd agent |
-| Linux | supported | CI-tested on `ubuntu-24.04`; runs fine in the foreground, no service packaging yet |
+| Linux | supported | CI-tested on `ubuntu-24.04`; `termilink service install` generates and loads a systemd user unit |
 | Windows | **not supported** | `creack/pty` compiles there, but `StartWithSize` returns `ErrUnsupported` at runtime, so every PTY operation fails |
 
-There are no `//go:build` constraints and nothing branches on `runtime.GOOS` — the
-PTY library is what restricts it to Unix, which is also why Windows is absent
-from CI rather than failing in it.
+The PTY library is what restricts the core to Unix, which is also why Windows is
+absent from CI rather than failing in it. A few files do carry `//go:build`
+constraints — the service installers (`service_darwin.go`, `service_linux.go`,
+`service_other.go`) and the process-liveness check (`process_unix.go`,
+`process_windows.go`) — but everything they share is platform-neutral.
 
 In practice: build from source. **No binaries or releases are published yet.**
 Long-polling is the transport, so the gateway needs no inbound port and works
@@ -562,7 +564,7 @@ without one of those labels is written to the audit log verbatim.
 leaves the machine to a third party.
 
 **A service install captures the environment instead of tracking it.** The PATH
-written into the plist is the one resolved when you installed, so a toolchain
+written into the definition is the one resolved when you installed, so a toolchain
 installed or moved afterwards is not on the job's PATH until you re-run
 `termilink service install`. This is deliberate — an init system gives a job no
 environment of its own, and the alternative is a job that cannot find any tool —
@@ -672,19 +674,62 @@ And note that `.env` is read from the **config file's** directory, not from
 wherever the command was run, so `termilink --config ../other/config.yaml
 service install` inspects the same file the installed agent will.
 
-### Other platforms
+### Linux (systemd)
 
-`termilink service` is macOS-only today. On Linux and Windows the commands
-exist and explain what is missing rather than failing silently:
+```bash
+make service-install     # or: termilink service install
+```
+
+The same generated definition, written as a systemd **user** unit rather than a
+launchd plist. A user unit is the right scope for the same reason the agent runs
+as you on macOS: it is a per-user gateway, and a user unit is the only kind that
+can be managed without `sudo`. The unit lands in
+`~/.config/systemd/user/com.termilink.agent.service`, the logs in
+`~/.local/state/termilink/`, and `install` runs `systemctl --user daemon-reload`,
+`enable` and `restart` in that order. If the unit will not start, `install`
+disables and deletes it rather than leaving a job that is enabled and broken.
+
+Control it with:
+
+```bash
+termilink service status     # paths, plus systemctl's view of the unit
+termilink service uninstall  # stop and delete the unit (logs are kept)
+```
+
+`Restart=on-failure` with `RestartSec=10` mirrors launchd's `KeepAlive`: a crash
+is restarted after ten seconds, while `SIGTERM` — which the agent catches, saves
+its sessions and exits 0 — leaves it stopped. There is no `termilink stop` here
+either; stop it without removing it with:
+
+```bash
+systemctl --user stop com.termilink.agent   # stops; still installed
+```
+
+It comes back at the next login, because the unit is still enabled. The PATH
+capture, the generated-definition review and the bot-token rules are identical
+to macOS above — the unit carries no token for the same reason the plist does
+not, and `termilink service path` and `termilink service render` behave exactly
+as described there. What changes is the grammar: `Environment=` instead of
+`EnvironmentVariables`, `StandardOutput=append:` instead of `StandardOutPath`.
+
+If `systemctl --user` cannot reach a running user manager — some containers, WSL
+without systemd enabled — `install` fails with systemctl's own message instead of
+pretending to have installed something.
+
+### Windows
+
+`termilink service` is implemented on macOS (launchd) and Linux (systemd). On
+Windows the commands exist and explain what is missing rather than failing
+silently:
 
 ```console
 $ termilink service install
-termilink service install is not implemented on linux yet; the planned approach is a systemd user unit
+termilink service install is not implemented on windows yet; the planned approach is a service registration (nssm or the SCM directly)
 ```
 
 The service description, the PATH resolution and the command surface are already
-platform-neutral, so this is a renderer to write rather than a redesign. Linux
-and Windows are tracked in `project.md`.
+platform-neutral — Linux needed a renderer, not a redesign — so Windows is a
+renderer to write as well. It is tracked in `project.md`.
 
 ## CLI
 
@@ -696,7 +741,7 @@ termilink projects     # list configured projects
 termilink sessions     # list active sessions
 termilink audit        # show recent audit log entries
 termilink init         # scaffold a config file
-termilink service ...  # install as a service (macOS): render/install/status/uninstall/path
+termilink service ...  # install as a service (macOS/Linux): render/install/status/uninstall/path
 ```
 
 ## Development

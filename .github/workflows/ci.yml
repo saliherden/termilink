@@ -27,7 +27,9 @@ jobs:
       matrix:
         # Windows is absent on purpose. creack/pty compiles there, but
         # StartWithSize returns ErrUnsupported at runtime, so every PTY test
-        # would fail on a runner that could never be made to pass.
+        # would fail on a runner that could never be made to pass. The Windows
+        # build is still type checked: a later step cross-compiles the whole
+        # module with GOOS=windows.
         #
         # The Linux label is pinned rather than ubuntu-latest. These tests
         # drive a real zsh over a PTY and read the terminal's line settings, so
@@ -69,6 +71,18 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Cross-compile for Windows
+        # Windows is not in the matrix, so nothing else compiles the
+        # `//go:build windows` files — and a platform-tagged symbol that does
+        # not exist on Windows is invisible until someone tries to build there.
+        # A bare syscall.Kill in internal/instance was exactly that. Cross-
+        # compiling and cross-vetting on the Linux runner closes the gap. Vet
+        # also compiles the package's test files for the Windows target, so
+        # process_test.go is type checked there even though it cannot run.
+        run: |
+          GOOS=windows go build ./...
+          GOOS=windows go vet ./...
+
       - name: Test
         # The race detector is the point of this job, not an extra: the
         # duplicate read of a shared timestamp in the agent relay only shows up
@@ -79,11 +93,12 @@ jobs:
       - name: Staticcheck
         # Runs on both operating systems, because staticcheck analyses compiled
         # code and the compilation depends on GOOS. service_other.go and
-        # service_other_test.go carry `//go:build !darwin`, so on a macOS-only
-        # run they are not even parsed: a Linux-only staticcheck passed over a
-        # dead `if err != nil` around a stub that can never return nil (SA4023),
-        # and then over two test helpers nothing called (U1000). Neither was
-        # reachable from a macOS shell, and both turned a green local run red.
+        # service_other_test.go carry `//go:build !darwin && !linux`, so on a
+        # macOS-only run they are not even parsed: a Linux-only staticcheck
+        # passed over a dead `if err != nil` around a stub that can never return
+        # nil (SA4023), and then over two test helpers nothing called (U1000).
+        # Neither was reachable from a macOS shell, and both turned a green local
+        # run red.
         #
         # fail-fast is already off above, so a failure on one platform still
         # reports the other rather than hiding it.

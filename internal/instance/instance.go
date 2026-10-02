@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 )
 
 // DefaultLockPath returns the global PID lock path shared by every TermiLink
@@ -89,9 +88,4 @@ func readPID(path string) (int, error) {
 		return 0, errors.New("invalid pid")
 	}
 	return pid, nil
-}
-
-func processAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
 }

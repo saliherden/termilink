@@ -41,11 +41,11 @@ func goldenService() *servicedef.Service {
 
 func goldenPaths() servicedef.Paths {
 	return servicedef.Paths{
-		Plist:     "/Users/you/Library/LaunchAgents/com.termilink.agent.plist",
-		LogDir:    "/Users/you/Library/Logs/termilink",
-		LogStdout: "/Users/you/Library/Logs/termilink/stdout.log",
-		LogStderr: "/Users/you/Library/Logs/termilink/stderr.log",
-		User:      "you",
+		Definition: "/Users/you/Library/LaunchAgents/com.termilink.agent.plist",
+		LogDir:     "/Users/you/Library/Logs/termilink",
+		LogStdout:  "/Users/you/Library/Logs/termilink/stdout.log",
+		LogStderr:  "/Users/you/Library/Logs/termilink/stderr.log",
+		User:       "you",
 	}
 }
 
@@ -240,7 +240,7 @@ func TestRenderRejectsBadInput(t *testing.T) {
 
 	t.Run("missing plist path", func(t *testing.T) {
 		paths := goldenPaths()
-		paths.Plist = ""
+		paths.Definition = ""
 		if _, err := Render(goldenService(), paths); err == nil {
 			t.Error("expected an error when no plist path is given")
 		}
@@ -278,8 +278,8 @@ func TestPathsAndFileName(t *testing.T) {
 	// reverse-DNS label because launchd namespaces every vendor in one flat
 	// space, while ~/Library/Logs holds human-facing directories that Apple
 	// names after the product.
-	if paths.Plist != "/Users/you/Library/LaunchAgents/com.termilink.agent.plist" {
-		t.Errorf("Plist = %q", paths.Plist)
+	if paths.Definition != "/Users/you/Library/LaunchAgents/com.termilink.agent.plist" {
+		t.Errorf("Definition = %q", paths.Definition)
 	}
 	if paths.LogDir != "/Users/you/Library/Logs/termilink" {
 		t.Errorf("LogDir = %q", paths.LogDir)

@@ -1,4 +1,4 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package cli
 
@@ -12,10 +12,10 @@ import (
 // unsupportedRenderer stands in on platforms that have no service installer yet.
 //
 // It exists because the command surface has to compile and be testable on every
-// platform, and because "not implemented on linux" is a worse answer than it
-// looks when the command first resolves a PATH, loads config.yaml and prints a
-// token warning before failing. supported() is asked before any of that, so the
-// refusal is the first thing printed.
+// platform, and because "not implemented on this platform" is a worse answer
+// than it looks when the command first resolves a PATH, loads config.yaml and
+// prints a token warning before failing. supported() is asked before any of
+// that, so the refusal is the first thing printed.
 //
 // It was once a set of build-tagged free functions instead of a type. The
 // callers had to check `if err != nil` around a call that could never return
@@ -27,8 +27,8 @@ import (
 // returning it from platformRenderer. Nothing in service.go changes.
 type unsupportedRenderer struct{}
 
-// platformRenderer is macOS's counterpart, and the only place this file touches
-// the rest of the CLI.
+// platformRenderer is the counterpart the supported platforms each define in
+// their own file, and the only place this file touches the rest of the CLI.
 func platformRenderer() serviceRenderer { return unsupportedRenderer{} }
 
 func (unsupportedRenderer) name() string { return runtime.GOOS }
@@ -62,11 +62,10 @@ func (unsupportedRenderer) status(*servicedef.Service, servicedef.Paths) error {
 
 // unsupported explains what is missing and where the plan lives, rather than
 // failing with a bare "not implemented". The plan is named per platform because
-// the approach genuinely differs: a user unit and a service registration are
-// not the same amount of work.
+// the approach genuinely differs: a service registration is not the same amount
+// of work as a user unit.
 func unsupported(what string) error {
 	planned := map[string]string{
-		"linux":   "a systemd user unit",
 		"windows": "a service registration (nssm or the SCM directly)",
 	}[runtime.GOOS]
 	if planned == "" {
