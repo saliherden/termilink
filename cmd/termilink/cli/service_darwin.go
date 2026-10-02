@@ -12,9 +12,33 @@ import (
 	"github.com/saliherden/termilink/internal/servicedef/launchd"
 )
 
-// renderService turns a description into the native definition for this
-// platform.
-func renderService(svc *servicedef.Service, paths servicedef.Paths) ([]byte, error) {
+// launchdRenderer installs the agent as a per-user launchd job.
+//
+// The methods are on a type rather than free functions so that this file and
+// service_other.go satisfy the same interface; see serviceRenderer.
+type launchdRenderer struct{}
+
+// platformRenderer is the only place macOS identifies itself to the rest of the
+// CLI, so there is exactly one answer to which renderer a build uses.
+func platformRenderer() serviceRenderer { return launchdRenderer{} }
+
+func (launchdRenderer) name() string { return "launchd" }
+
+func (launchdRenderer) supported() error { return nil }
+
+// paths resolves the LaunchAgents plist and the log files under
+// ~/Library/Logs. macOS purges /tmp periodically, so a log written there
+// disappears without a trace, which makes it useless for the one thing a service
+// log is for.
+func (launchdRenderer) paths(label string) (servicedef.Paths, error) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return servicedef.Paths{}, fmt.Errorf("no home directory: a service definition needs absolute paths")
+	}
+	return launchd.LogPaths(home, label), nil
+}
+
+func (launchdRenderer) render(svc *servicedef.Service, paths servicedef.Paths) ([]byte, error) {
 	return launchd.Render(svc, paths)
 }
 
@@ -23,7 +47,7 @@ func renderService(svc *servicedef.Service, paths servicedef.Paths) ([]byte, err
 // The order matters. bootstrap loads the job from the plist, so the file has
 // to be in place first; and the agent must not be left registered but unloaded
 // if writing fails, so a partially written file is removed before returning.
-func installService(svc *servicedef.Service, paths servicedef.Paths) error {
+func (launchdRenderer) install(svc *servicedef.Service, paths servicedef.Paths) error {
 	if err := os.MkdirAll(filepath.Dir(paths.Plist), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(paths.Plist), err)
 	}
@@ -31,7 +55,7 @@ func installService(svc *servicedef.Service, paths servicedef.Paths) error {
 		return fmt.Errorf("create the log directory %s: %w", paths.LogDir, err)
 	}
 
-	def, err := renderService(svc, paths)
+	def, err := launchd.Render(svc, paths)
 	if err != nil {
 		return err
 	}
@@ -63,7 +87,7 @@ func installService(svc *servicedef.Service, paths servicedef.Paths) error {
 // uninstallService stops the job and removes the definition. The log directory
 // is left in place: it is evidence of what the agent did, and deleting a
 // service should not be the thing that destroys the record.
-func uninstallService(svc *servicedef.Service, paths servicedef.Paths) error {
+func (launchdRenderer) uninstall(svc *servicedef.Service, paths servicedef.Paths) error {
 	stopped := serviceBootout(svc, paths)
 	if err := os.Remove(paths.Plist); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("remove %s: %w", paths.Plist, err)
@@ -79,7 +103,7 @@ func uninstallService(svc *servicedef.Service, paths servicedef.Paths) error {
 }
 
 // serviceStatus reports whether the job is registered and what it is doing.
-func serviceStatus(svc *servicedef.Service, paths servicedef.Paths) error {
+func (launchdRenderer) status(svc *servicedef.Service, paths servicedef.Paths) error {
 	if _, err := os.Stat(paths.Plist); err != nil {
 		if os.IsNotExist(err) {
 			fmt.Println("Not installed (no plist).")

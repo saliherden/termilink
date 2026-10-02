@@ -9,33 +9,61 @@ import (
 	"github.com/saliherden/termilink/internal/servicedef"
 )
 
-// The service renderer is macOS-only for now. These stubs keep the command
-// surface identical on every platform, so the Linux CI runner compiles the same
-// code path macOS gets and a cross-platform `termilink service install` is a
-// matter of implementing this file rather than restructuring the command.
+// unsupportedRenderer stands in on platforms that have no service installer yet.
 //
-// The Linux and Windows work is tracked in project.md. It needs no new
-// configuration: state_file and audit_keep are already in place, which is what
-// a service install under an account with no home directory requires.
+// It exists because the command surface has to compile and be testable on every
+// platform, and because "not implemented on linux" is a worse answer than it
+// looks when the command first resolves a PATH, loads config.yaml and prints a
+// token warning before failing. supported() is asked before any of that, so the
+// refusal is the first thing printed.
+//
+// It was once a set of build-tagged free functions instead of a type. The
+// callers had to check `if err != nil` around a call that could never return
+// nil on this platform, which staticcheck correctly reported as dead code: the
+// error was not reachable behaviour, it was decoration. Behind an interface the
+// call is dynamic and the check means what it says on every platform.
+//
+// Implementing a platform means writing one type with these six methods and
+// returning it from platformRenderer. Nothing in service.go changes.
+type unsupportedRenderer struct{}
 
-func renderService(*servicedef.Service, servicedef.Paths) ([]byte, error) {
-	return nil, unsupported("render")
+// platformRenderer is macOS's counterpart, and the only place this file touches
+// the rest of the CLI.
+func platformRenderer() serviceRenderer { return unsupportedRenderer{} }
+
+func (unsupportedRenderer) name() string { return runtime.GOOS }
+
+// supported is the refusal, asked before any work is done.
+func (unsupportedRenderer) supported() error { return unsupported("service") }
+
+// The remaining methods are unreachable in practice — supported has already
+// refused — but they have to exist to satisfy the interface. They return the
+// same error rather than nil so that a future caller reaching one directly gets
+// a truthful answer instead of a zero Paths that would send a plist to "".
+func (unsupportedRenderer) paths(string) (servicedef.Paths, error) {
+	return servicedef.Paths{}, unsupported("service")
 }
 
-func installService(*servicedef.Service, servicedef.Paths) error {
-	return unsupported("install")
+func (unsupportedRenderer) render(*servicedef.Service, servicedef.Paths) ([]byte, error) {
+	return nil, unsupported("service")
 }
 
-func uninstallService(*servicedef.Service, servicedef.Paths) error {
-	return unsupported("uninstall")
+func (unsupportedRenderer) install(*servicedef.Service, servicedef.Paths) error {
+	return unsupported("service")
 }
 
-func serviceStatus(*servicedef.Service, servicedef.Paths) error {
-	return unsupported("status")
+func (unsupportedRenderer) uninstall(*servicedef.Service, servicedef.Paths) error {
+	return unsupported("service")
+}
+
+func (unsupportedRenderer) status(*servicedef.Service, servicedef.Paths) error {
+	return unsupported("service")
 }
 
 // unsupported explains what is missing and where the plan lives, rather than
-// failing with a bare "not implemented".
+// failing with a bare "not implemented". The plan is named per platform because
+// the approach genuinely differs: a user unit and a service registration are
+// not the same amount of work.
 func unsupported(what string) error {
 	planned := map[string]string{
 		"linux":   "a systemd user unit",

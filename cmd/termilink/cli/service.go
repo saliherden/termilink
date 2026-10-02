@@ -15,14 +15,54 @@ import (
 	"github.com/saliherden/termilink/internal/audit"
 	"github.com/saliherden/termilink/internal/config"
 	"github.com/saliherden/termilink/internal/servicedef"
-	"github.com/saliherden/termilink/internal/servicedef/launchd"
 	"github.com/saliherden/termilink/internal/session"
 )
 
-// newServiceCmd builds the `termilink service` tree. Everything platform
-// specific lives in service_darwin.go and service_other.go behind a build tag,
-// so this file is identical on every system and the Linux CI runner compiles
-// the same command surface macOS gets — minus the implementation.
+// serviceRenderer is what a platform has to provide to install TermiLink as a
+// service. The description it consumes is platform-neutral; the definition it
+// produces and the supervisor it registers with are not, and that difference is
+// the whole reason this is an interface rather than a function with a switch
+// inside it.
+//
+// It exists as an interface rather than a set of build-tagged functions because
+// that shape was wrong in a way only staticcheck caught. As plain functions, a
+// platform without an implementation still had to define renderService, so every
+// caller checked `if err != nil` around a call that could never return nil —
+// dead code on that platform, and on the platforms that do implement it, code
+// whose only reader was the compiler. Behind an interface the call is dynamic,
+// the check is honest everywhere, and adding a platform means writing one type
+// instead of editing a shared file.
+type serviceRenderer interface {
+	// name is the platform's supervisor, for messages.
+	name() string
+
+	// supported reports whether this platform can install the agent at all, and
+	// is asked before any work begins. A platform without a renderer returns the
+	// explanation here rather than from each of the methods below, so the refusal
+	// costs nothing instead of arriving after the configuration has been read.
+	supported() error
+
+	// paths resolves where this platform keeps a definition and its logs. It is
+	// asked before the definition is built because the log location is part of
+	// the description and not an afterthought of the render.
+	paths(label string) (servicedef.Paths, error)
+
+	// render produces the native definition without touching the machine.
+	render(svc *servicedef.Service, paths servicedef.Paths) ([]byte, error)
+
+	// install writes the definition and registers the job.
+	install(svc *servicedef.Service, paths servicedef.Paths) error
+
+	// uninstall stops the job and removes the definition, leaving logs.
+	uninstall(svc *servicedef.Service, paths servicedef.Paths) error
+
+	// status reports whether the job is registered and what it is doing.
+	status(svc *servicedef.Service, paths servicedef.Paths) error
+}
+
+// newServiceCmd builds the `termilink service` tree. The tree itself is
+// identical on every system; only the renderer behind serviceRenderer differs,
+// so the Linux CI runner compiles the same command surface macOS gets.
 func newServiceCmd(configPath *string) *cobra.Command {
 	var (
 		pathOverride string
@@ -45,15 +85,24 @@ environment of its own.`,
 	cmd.PersistentFlags().BoolVarP(&assumeYes, "yes", "y", false, "do not ask for confirmation")
 	cmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "print what would happen without writing anything")
 
+	renderer := platformRenderer()
+
+	// The platform is asked before anything is resolved. A PATH lookup spawns a
+	// login shell, and on a machine where the agent cannot be installed the user
+	// would sit through that to be told so at the very end. `service path` is
+	// deliberately exempt: resolving a PATH is platform-independent, so it stays
+	// available as the one diagnostic that works everywhere.
+	requireSupported := func() error { return renderer.supported() }
+
 	// build is for the commands that produce a definition and therefore have
 	// something to explain: render and install. buildRemoval is for the commands
 	// that only tear one down, where the PATH and the token are not being decided
 	// and narrating them buries the one line the user asked for.
 	build := func() (*servicedef.Service, servicedef.Paths, error) {
-		return buildService(*configPath, pathOverride, true)
+		return buildService(renderer, *configPath, pathOverride, true)
 	}
 	buildRemoval := func() (*servicedef.Service, servicedef.Paths, error) {
-		return buildService(*configPath, pathOverride, false)
+		return buildService(renderer, *configPath, pathOverride, false)
 	}
 
 	// render is the read-only half. It writes nothing anywhere, which is what
@@ -64,11 +113,14 @@ environment of its own.`,
 		Short: "print the service definition without installing it",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := requireSupported(); err != nil {
+				return err
+			}
 			svc, paths, err := build()
 			if err != nil {
 				return err
 			}
-			def, err := renderService(svc, paths)
+			def, err := renderer.render(svc, paths)
 			if err != nil {
 				return err
 			}
@@ -82,16 +134,19 @@ environment of its own.`,
 		Short: "install and start the service",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := requireSupported(); err != nil {
+				return err
+			}
 			svc, paths, err := build()
 			if err != nil {
 				return err
 			}
 			if dryRun {
 				fmt.Println("Dry run: no files were written and no service was loaded.")
-				return describeService(svc, paths)
+				return describeService(renderer, svc, paths)
 			}
 			if !assumeYes {
-				ok, err := confirmService(svc, paths)
+				ok, err := confirmService(renderer, svc, paths)
 				if err != nil {
 					return err
 				}
@@ -100,7 +155,7 @@ environment of its own.`,
 					return nil
 				}
 			}
-			return installService(svc, paths)
+			return renderer.install(svc, paths)
 		},
 	})
 
@@ -109,6 +164,9 @@ environment of its own.`,
 		Short: "stop and remove the service",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := requireSupported(); err != nil {
+				return err
+			}
 			svc, paths, err := buildRemoval()
 			if err != nil {
 				return err
@@ -138,7 +196,7 @@ environment of its own.`,
 					return nil
 				}
 			}
-			return uninstallService(svc, paths)
+			return renderer.uninstall(svc, paths)
 		},
 	})
 
@@ -147,11 +205,14 @@ environment of its own.`,
 		Short: "show where the service is installed and whether it is running",
 		Args:  cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			if err := requireSupported(); err != nil {
+				return err
+			}
 			svc, paths, err := buildRemoval()
 			if err != nil {
 				return err
 			}
-			if err := describeService(svc, paths); err != nil {
+			if err := describeService(renderer, svc, paths); err != nil {
 				return err
 			}
 			// The resolved config paths are printed next to the service ones,
@@ -162,7 +223,7 @@ environment of its own.`,
 				describeResolvedPaths(cfg)
 			}
 			fmt.Println()
-			return serviceStatus(svc, paths)
+			return renderer.status(svc, paths)
 		},
 	})
 
@@ -197,7 +258,7 @@ environment of its own.`,
 // explaining turns on the two reports — how the PATH was resolved and where the
 // token came from. They are for the commands that write a definition and whose
 // answer depends on both. `service path` exists to show the PATH on its own.
-func buildService(configPath, pathOverride string, explaining bool) (*servicedef.Service, servicedef.Paths, error) {
+func buildService(renderer serviceRenderer, configPath, pathOverride string, explaining bool) (*servicedef.Service, servicedef.Paths, error) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return nil, servicedef.Paths{}, err
@@ -231,6 +292,14 @@ func buildService(configPath, pathOverride string, explaining bool) (*servicedef
 	}
 
 	label := servicedef.DefaultLabel
+	// The platform's own locations come from the renderer, which is also what
+	// refuses a platform that has no renderer: asking for paths is the cheapest
+	// way to find out, and it cannot succeed by accident on a system where the
+	// rest of this function has nothing to contribute.
+	paths, err := renderer.paths(label)
+	if err != nil {
+		return nil, servicedef.Paths{}, err
+	}
 	jobPath, report, err := resolveJobPath(pathOverride)
 	if err != nil {
 		return nil, servicedef.Paths{}, err
@@ -240,12 +309,6 @@ func buildService(configPath, pathOverride string, explaining bool) (*servicedef
 	if explaining {
 		fmt.Fprintln(os.Stderr, report.String())
 	}
-
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return nil, servicedef.Paths{}, fmt.Errorf("no home directory: a service definition needs absolute paths")
-	}
-	paths := launchd.LogPaths(home, label)
 
 	svc := servicedef.New(label, executable, workingDir, stateFile, paths.LogDir, []string{
 		"PATH=" + jobPath,
@@ -423,8 +486,9 @@ func lastFieldFallback(out string) string {
 
 // describeService prints where a service would be installed, so the paths can
 // be checked before anything is written.
-func describeService(svc *servicedef.Service, paths servicedef.Paths) error {
+func describeService(renderer serviceRenderer, svc *servicedef.Service, paths servicedef.Paths) error {
 	fmt.Printf("Label:       %s\n", svc.Label)
+	fmt.Printf("Supervisor:  %s\n", renderer.name())
 	fmt.Printf("Executable:  %s\n", svc.Executable)
 	fmt.Printf("Working dir: %s\n", svc.WorkingDir)
 	fmt.Printf("Definition:  %s\n", paths.Plist)
@@ -438,12 +502,12 @@ func describeService(svc *servicedef.Service, paths servicedef.Paths) error {
 // The definition is printed rather than merely described, because the generated
 // file is the only place where a wrong PATH or a stray environment entry is
 // actually visible.
-func confirmService(svc *servicedef.Service, paths servicedef.Paths) (bool, error) {
-	if err := describeService(svc, paths); err != nil {
+func confirmService(renderer serviceRenderer, svc *servicedef.Service, paths servicedef.Paths) (bool, error) {
+	if err := describeService(renderer, svc, paths); err != nil {
 		return false, err
 	}
 	fmt.Println()
-	def, err := renderService(svc, paths)
+	def, err := renderer.render(svc, paths)
 	if err != nil {
 		return false, err
 	}
