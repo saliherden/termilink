@@ -121,19 +121,6 @@ func TestPlatformRendererIsTheUnsupportedOne(t *testing.T) {
 	}
 }
 
-func contains(haystack, needle string) bool {
-	return len(needle) == 0 || len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
-}
-
-func indexOf(haystack, needle string) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
-}
-
 // The refusal must be the first thing that happens, before the PATH lookup.
 //
 // resolveJobPath spawns an interactive login shell, so the previous shape made a

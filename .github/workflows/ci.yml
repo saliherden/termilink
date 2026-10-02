@@ -77,8 +77,17 @@ jobs:
         run: go test -race -timeout 15m ./...
 
       - name: Staticcheck
-        # Platform-independent, so it runs once. Pinned on purpose: an
-        # unpinned @latest would let a new release turn a green build red for
-        # reasons that have nothing to do with this commit.
-        if: runner.os == 'Linux'
+        # Runs on both operating systems, because staticcheck analyses compiled
+        # code and the compilation depends on GOOS. service_other.go and
+        # service_other_test.go carry `//go:build !darwin`, so on a macOS-only
+        # run they are not even parsed: a Linux-only staticcheck passed over a
+        # dead `if err != nil` around a stub that can never return nil (SA4023),
+        # and then over two test helpers nothing called (U1000). Neither was
+        # reachable from a macOS shell, and both turned a green local run red.
+        #
+        # fail-fast is already off above, so a failure on one platform still
+        # reports the other rather than hiding it.
+        #
+        # Pinned on purpose: an unpinned @latest would let a new release turn a
+        # green build red for reasons that have nothing to do with this commit.
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
