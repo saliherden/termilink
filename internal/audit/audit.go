@@ -142,9 +142,24 @@ func OpenWithOptions(path string, maxBytes int64, keep int) (*Logger, error) {
 	if keep < 1 {
 		keep = 1
 	}
+	// 0700 for the directory and a chmod on both, so the guarantee holds for an
+	// audit log that already exists. Neither MkdirAll nor OpenFile applies a mode
+	// to something that is already there, which meant a log written by an older
+	// build kept 0644 in a 0755 directory while a fresh one got 0600 — the same
+	// log, two answers depending on when it was created.
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("audit: create %s: %w", filepath.Dir(path), err)
+	}
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+		return nil, fmt.Errorf("audit: secure %s: %w", filepath.Dir(path), err)
+	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("audit: open %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("audit: secure %s: %w", path, err)
 	}
 	return &Logger{path: path, f: f, maxBytes: maxBytes, keep: keep}, nil
 }

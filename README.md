@@ -71,8 +71,8 @@ Install zsh (`apt install zsh`) or point that one line at your own shell.
 
 | platform | status | notes |
 | --- | --- | --- |
-| macOS | supported | CI-tested; a launchd template ships (`scripts/com.termilink.agent.plist`) |
-| Linux | supported | CI-tested on `ubuntu-24.04`; no systemd unit ships yet |
+| macOS | supported | CI-tested; `termilink service install` generates and loads a launchd agent |
+| Linux | supported | CI-tested on `ubuntu-24.04`; runs fine in the foreground, no service packaging yet |
 | Windows | **not supported** | `creack/pty` compiles there, but `StartWithSize` returns `ErrUnsupported` at runtime, so every PTY operation fails |
 
 There are no `//go:build` constraints and nothing branches on `runtime.GOOS` — the
@@ -561,37 +561,130 @@ without one of those labels is written to the audit log verbatim.
 [External links](#external-links). This is the only path where file content
 leaves the machine to a third party.
 
+**A service install captures the environment instead of tracking it.** The PATH
+written into the plist is the one resolved when you installed, so a toolchain
+installed or moved afterwards is not on the job's PATH until you re-run
+`termilink service install`. This is deliberate — an init system gives a job no
+environment of its own, and the alternative is a job that cannot find any tool —
+but it means a machine that changes often wants reinstalling when it does.
+`termilink service path` shows the current answer.
+
 ## Run as a service
 
 ### macOS (launchd)
 
-A template is provided at `scripts/com.termilink.agent.plist`. Fill in the
-binary path and the directory containing `config.yaml`, then install:
-
 ```bash
-sed "s|/PATH/TO/termilink|/Users/you/bin/termilink|; s|/PATH/TO/DIR/WITH/config.yaml|/Users/you/termilink|" \
-    scripts/com.termilink.agent.plist > ~/Library/LaunchAgents/com.termilink.agent.plist
-launchctl load ~/Library/LaunchAgents/com.termilink.agent.plist
+make service-install     # or: termilink service install
 ```
 
-Replace the placeholders (`/PATH/TO/termilink` binary, `/PATH/TO/DIR/WITH/config.yaml`
-directory — also fix the `StandardOutPath`/`StandardErrorPath` if you like).
+The definition is generated from your resolved configuration, so there is no
+template to fill in. `install` prints the paths it will use and the plist it is
+about to write, then asks before touching anything.
+
 Control it with:
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.termilink.agent.plist   # stop
-launchctl print gui/$(id -u)/com.termilink.agent                    # status
+termilink service status     # paths, plus whether launchd has it loaded
+termilink service uninstall  # stop and delete the plist (logs are kept)
 ```
 
-`RunAtLoad` starts the agent on login; `KeepAlive.SuccessfulExit = false`
-restarts it if it crashes. While it runs under launchd, **don't** also run
-`termilink start` manually — the single-instance PID guard will refuse the second
-one.
+`RunAtLoad` starts the agent at login and `KeepAlive` restarts it after a crash.
+That means `KeepAlive` is satisfied by "it died badly" but not by "it was asked to
+stop": `SIGTERM` makes the agent save its sessions and exit 0, so a stopped agent
+stays stopped, while `kill -9` brings it back within `ThrottleInterval` seconds.
+
+There is no `termilink stop`. To stop it without removing it, ask launchd:
+
+```bash
+launchctl bootout gui/$(id -u)/com.termilink.agent   # stops; still installed
+```
+
+It comes back at the next login, because `RunAtLoad` is still true. `termilink
+service uninstall` is the one that deletes the plist, and it leaves
+`~/Library/Logs/termilink/` alone — a service log is the record of what the agent
+did, and removing the service should not be the thing that destroys it.
+
+While it runs under launchd, **don't** also run `termilink start` by hand — the
+single-instance PID guard refuses the second one. The reverse also holds: the
+agent runs shell commands as you, so `pkill -f termilink` typed into Telegram
+kills the agent's own process, and launchd starts it again.
+
+#### The PATH is the part that matters
+
+A launchd job starts with `PATH=/usr/bin:/bin:/usr/sbin:/sbin`. That is enough
+to run the binary and nothing else: no Homebrew, no `gh`, no `node`, no `java`.
+Because every shell the agent spawns inherits its environment, the job would
+work in a way that looks correct until you asked it to do anything real.
+
+So the PATH is captured at install time and written into the plist. Check what
+the job would get, without installing anything:
+
+```bash
+termilink service path          # the resolved PATH, and what was dropped
+termilink service render        # the full plist
+make service-render | plutil -lint -   # validate it
+```
+
+`service path` prints where the PATH came from and lists every entry it
+discarded. Entries that do not exist are dropped, which is how sandbox and
+stale paths stop being carried into a long-lived job; a literal `~` is expanded
+rather than passed along, since nothing downstream would expand it.
+
+If you install from somewhere that has a stripped environment — an IDE, a cron
+job, CI — the capture falls back to your login shell, and says so. Override
+either way with `--path`:
+
+```bash
+termilink service install --path "/opt/homebrew/bin:/usr/bin:/bin:$(go env GOBIN)"
+```
+
+The login shell is read with `-lic` on purpose. A plain login shell does not
+read `.zshrc`, so on a machine where Homebrew or `nvm` sets itself up there, the
+result has none of them.
+
+#### Bot token
+
+The plist carries no token. A property list in `~/Library/LaunchAgents` is
+world-readable, and the generated file is meant to be pasted into a review, so
+putting a credential in it would defeat the reason the job runs as you.
+
+What matters instead is *where* the token lives. A service job starts with no
+environment of its own, so a token that only ever existed in your shell is a job
+that comes up and cannot connect. Two of the three places work:
+
+| token lives in | works under launchd |
+| --- | --- |
+| `config.yaml`, as a literal | yes |
+| `.env` beside `config.yaml` | yes — the agent loads that file at startup |
+| your interactive environment | **no** |
+
+`service install` reports which one applies, and says so before you commit:
+
+```console
+$ termilink service install
+note: the bot token is in .env next to config.yaml, which the service can read.
+      Keep that file at 0600: it is the one thing that grants shell access.
+```
+
+A `.env` file is the usual answer because it keeps `config.yaml` safe to paste
+into an issue and the token out of it. `chmod 600` it — it is a shell credential.
+And note that `.env` is read from the **config file's** directory, not from
+wherever the command was run, so `termilink --config ../other/config.yaml
+service install` inspects the same file the installed agent will.
 
 ### Other platforms
 
-A systemd unit (Linux) or Windows Service wrapper can be added the same way;
-only the macOS template ships today.
+`termilink service` is macOS-only today. On Linux and Windows the commands
+exist and explain what is missing rather than failing silently:
+
+```console
+$ termilink service install
+termilink service install is not implemented on linux yet; the planned approach is a systemd user unit
+```
+
+The service description, the PATH resolution and the command surface are already
+platform-neutral, so this is a renderer to write rather than a redesign. Linux
+and Windows are tracked in `project.md`.
 
 ## CLI
 
@@ -603,6 +696,7 @@ termilink projects     # list configured projects
 termilink sessions     # list active sessions
 termilink audit        # show recent audit log entries
 termilink init         # scaffold a config file
+termilink service ...  # install as a service (macOS): render/install/status/uninstall/path
 ```
 
 ## Development
@@ -626,6 +720,8 @@ make test   # CI additionally runs the race detector
 | `internal/agent` | TUI bridge, terminal emulator, renderer |
 | `internal/security` | roles, dangerous-command vet, workspace policy |
 | `internal/audit` | append-only JSONL audit log |
+| `internal/servicedef` | platform-neutral service description and PATH resolution |
+| `internal/servicedef/launchd` | macOS plist renderer |
 
 Three decisions are worth knowing before reading the code. **The command frame:**
 every command runs in the persistent shell wrapped in `crypto/rand` markers, and
@@ -647,6 +743,12 @@ critical section, so the goroutine running a command and the one answering
 `/status` cannot be looking at the same struct — and `/status` cannot pair a
 project with a directory that belongs to a different one.
 
+**A service job's PATH is captured, not inherited.** An init system starts a job
+with a minimal environment, so the generated definition carries the PATH that
+was resolved at install time. `termilink service path` shows what it resolved
+to and what it dropped; install with `--path` to override. See
+[Run as a service](#run-as-a-service).
+
 ## Troubleshooting
 
 **"Unknown command" for something that looks like a command.** A leading `/`
@@ -660,7 +762,16 @@ checked at load time — install zsh or point `terminal.shell` at your own shell
 
 **A second `termilink start` is refused.** The PID lock at
 `~/.termilink/termilink.pid` is held by another instance — stop it, or delete the
-file if you are sure nothing is running.
+file if you are sure nothing is running. Note that under launchd the instance you
+want to stop *is* the service: `launchctl bootout gui/$(id -u)/com.termilink.agent`.
+
+**Everything in `~/.termilink/` is private.** The directory is `0700` and its
+files `0600`, on the reasoning that the audit log records every command you ran
+and the state file holds the chat id of every conversation and the path of every
+directory the agent has touched. That is enough to describe your work to another
+account on a shared machine without revealing any of it. An older build wrote
+some of it as `0644`; the permissions are corrected on the next write, or run
+`chmod 700 ~/.termilink && chmod 600 ~/.termilink/*`.
 
 **`agent` says the project is not set.** It runs inside the selected project
 directory, so send `/project <name>` first.
@@ -699,9 +810,12 @@ on a date.
 - **Scheduled tasks** — the one thing the agent CLIs cannot do: a job that runs
   when no agent session is open. Everything else on this list is either already
   here or a few lines of template.
-- **Service templates** — a systemd user unit and a Windows service wrapper.
-  `state_file` and `audit_keep` are already in place to support them, so this is
-  packaging rather than new behaviour.
+- **Service packaging for Linux and Windows** — `termilink service` currently
+  implements macOS only, and says so on the other two. The service description,
+  the PATH resolution and the command surface are already platform-neutral, so
+  this is a renderer each: a systemd user unit for Linux, an SCM or nssm
+  registration for Windows. `state_file` and `audit_keep` are in place for the
+  case that matters most there, an account with no home directory.
 
 **Not planned**
 

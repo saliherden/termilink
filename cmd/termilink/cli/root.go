@@ -25,6 +25,7 @@ func NewRootCmd() *cobra.Command {
 		newProjectsCmd(&configPath),
 		newSessionsCmd(&configPath),
 		newAuditCmd(&configPath),
+		newServiceCmd(&configPath),
 		newInitCmd(&configPath),
 	)
 	return root

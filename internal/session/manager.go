@@ -176,10 +176,25 @@ func (m *Manager) saveLocked() error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(m.stateFile), 0o755); err != nil {
+	// 0700 and 0600, matching the audit log. This directory is readable on a
+	// shared machine otherwise, and it holds the chat id of every conversation
+	// the agent has been in and the path of every directory it has touched —
+	// enough to describe someone's work without revealing any of its contents.
+	dir := filepath.Dir(m.stateFile)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(m.stateFile, data, 0o644)
+	// Neither MkdirAll nor WriteFile applies a mode to something that already
+	// exists, so a state file from an earlier build would otherwise keep 0644 in
+	// a 0755 directory forever. The chmods are what make this an upgrade and not
+	// just a default for new installs.
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(m.stateFile, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(m.stateFile, 0o600)
 }
 
 func (m *Manager) List() []*State {

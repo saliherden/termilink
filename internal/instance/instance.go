@@ -27,7 +27,18 @@ func Acquire(lockPath string) (func() error, error) {
 		return nil, errors.New("no lock path available")
 	}
 	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		// 0600 for the same reason as the audit log and the session state: this
+		// directory is the agent's own, and nothing in it should be readable by
+		// another account on the machine. The chmod is what upgrades a directory
+		// an earlier build already created at 0755.
+		dir := filepath.Dir(lockPath)
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err == nil {
 			_, werr := fmt.Fprintf(f, "%d\n", os.Getpid())
 			_ = f.Close()

@@ -48,10 +48,37 @@ type Config struct {
 
 	// Path of the loaded configuration file. Not serialized.
 	Path string `yaml:"-"`
+
+	// What resolveToken needs to name the token's origin. Not serialized, and
+	// only ever written by Load between the .env read and Validate.
+	tokenEnvBefore   string
+	tokenEnvWasSet   bool
+	tokenDotEnvFound bool
 }
+
+// Token origins, recorded while the token is resolved. The reason to keep them
+// is that the token's value alone cannot answer the question a service install
+// needs answered: "where did this come from?" ResolveToken replaces a
+// `${TELEGRAM_BOT_TOKEN}` reference with the real value, so by the time anything
+// inspects BotToken the answer is the same no matter which route it arrived by
+// — and a service job, which inherits no environment, works with one route and
+// not the other.
+const (
+	// TokenSourceConfig means the token is a literal in config.yaml.
+	TokenSourceConfig = "config.yaml"
+	// TokenSourceDotEnv means it came from the .env file beside config.yaml.
+	// A service job can use this: the agent loads that file at startup.
+	TokenSourceDotEnv = ".env next to config.yaml"
+	// TokenSourceProcessEnv means it came from the environment the caller
+	// already had. A service job will not have it.
+	TokenSourceProcessEnv = "the environment termilink was started in"
+)
 
 type TelegramConfig struct {
 	BotToken string `yaml:"bot_token"`
+	// TokenSource records where BotToken actually came from. Set by Load; not
+	// serialized and never asked for from the YAML.
+	TokenSource string `yaml:"-"`
 	// MaxFileBytes caps file transfers (get / auto-upload). Default: 50 MiB,
 	// Telegram's document upload limit.
 	MaxFileBytes int64 `yaml:"max_file_bytes"`
@@ -152,8 +179,24 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config %q: %w", path, err)
 	}
 
-	if err := loadDotEnv(".env"); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("load .env: %w", err)
+	// Recorded before loadDotEnv, because that is the only moment where the two
+	// are distinguishable: afterwards a variable from .env and one from the
+	// caller's environment are both just set in this process, and the difference
+	// decides whether a service job can start at all.
+	envBefore, envWasSet := os.LookupEnv("TELEGRAM_BOT_TOKEN")
+
+	dotEnvFound := false
+	// Next to the config file, not in the process's working directory. The
+	// documentation says "a .env next to config.yaml", and a service job's
+	// working directory is the config file's directory — so resolving it against
+	// the cwd made the file an installer reads and the file an installed agent
+	// reads two different files whenever the two directories differ.
+	if err := loadDotEnv(filepath.Join(filepath.Dir(path), ".env")); err != nil {
+		if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("load .env: %w", err)
+		}
+	} else {
+		dotEnvFound = true
 	}
 
 	cfg := Defaults()
@@ -161,6 +204,11 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %q: %w", path, err)
 	}
+
+	// Handed to resolveToken rather than decided here, because only it knows
+	// whether the token needed resolving at all: a literal in the file never
+	// reaches the environment, whatever it happens to contain.
+	cfg.tokenEnvBefore, cfg.tokenEnvWasSet, cfg.tokenDotEnvFound = envBefore, envWasSet, dotEnvFound
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -232,6 +280,13 @@ func (c *Config) resolveOwner() {
 	c.Security.AllowedUsers = append(c.Security.AllowedUsers, c.Security.Owner)
 }
 
+// resolveToken substitutes the token from the environment when the file holds a
+// reference or nothing, and records which of the two routes it took.
+//
+// The origin is the part that matters. A service job starts with no environment
+// of its own, so a token that was only ever in the environment is a job that
+// comes up and cannot connect — and the value alone cannot reveal that, because
+// a resolved token looks the same whichever route filled it in.
 func (c *Config) resolveToken() error {
 	tok := c.Telegram.BotToken
 	if tok == "" || strings.HasPrefix(tok, "${") {
@@ -240,7 +295,21 @@ func (c *Config) resolveToken() error {
 			return fmt.Errorf("telegram.bot_token is empty and TELEGRAM_BOT_TOKEN is not set")
 		}
 		c.Telegram.BotToken = env
+		// A variable that was already set before .env was read came from the
+		// caller. One that only exists afterwards came from the file beside
+		// config.yaml, which a service job can still read.
+		if c.tokenEnvWasSet && c.tokenEnvBefore != "" {
+			c.Telegram.TokenSource = TokenSourceProcessEnv
+		} else if c.tokenDotEnvFound {
+			c.Telegram.TokenSource = TokenSourceDotEnv
+		} else {
+			// No .env and no value before it: something set the variable
+			// during this Load, so the file is where it came from.
+			c.Telegram.TokenSource = TokenSourceDotEnv
+		}
+		return nil
 	}
+	c.Telegram.TokenSource = TokenSourceConfig
 	return nil
 }
 
