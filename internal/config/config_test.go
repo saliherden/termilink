@@ -347,3 +347,19 @@ agent:
 		t.Fatal("invalid agent.screen.mode should fail validation")
 	}
 }
+
+// The default config has to sit in TermiLink's own home, beside the state file
+// and the audit log. A relative default would make an installed service read a
+// config from wherever its binary happened to run, which is the bug the stable
+// home exists to remove.
+func TestDefaultConfigPathFollowsHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	if got, want := HomeDir(), filepath.Join(home, ".termilink"); got != want {
+		t.Errorf("HomeDir() = %q, want %q", got, want)
+	}
+	if got, want := DefaultConfigPath(), filepath.Join(home, ".termilink", DefaultConfigFileName); got != want {
+		t.Errorf("DefaultConfigPath() = %q, want %q", got, want)
+	}
+}

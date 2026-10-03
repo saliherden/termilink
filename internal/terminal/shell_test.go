@@ -315,7 +315,7 @@ func TestSliceFrameSurvivesShellEcho(t *testing.T) {
 	startTok := "S_" + marker + "#"
 	stopTok := "E_" + marker + "#"
 	cmd := `echo "[cwd=$PWD][project=$TERMILINK_PROJECT]"`
-	frame := fmt.Sprintf("printf '\\n%s'; %s; printf 'TLM_PWD:%%s\\n' \"$PWD\"; printf '%s'\\n",
+	frame := fmt.Sprintf("printf '\\n%s'; %s; printf 'TLM_PWD:%%s\\n' \"$(pwd)\"; printf '%s'\\n",
 		startTok, cmd, stopTok)
 
 	echoed := frame + startTok + "\n[cwd=/home/x][project=]\nTLM_PWD:/home/x\n" + stopTok

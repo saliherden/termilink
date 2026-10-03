@@ -68,6 +68,7 @@ func newServiceCmd(configPath *string) *cobra.Command {
 		pathOverride string
 		assumeYes    bool
 		dryRun       bool
+		binDir       string
 	)
 
 	cmd := &cobra.Command{
@@ -84,6 +85,7 @@ service job starts with a minimal environment of its own.`,
 	cmd.PersistentFlags().StringVar(&pathOverride, "path", "", "use this PATH for the job instead of detecting one")
 	cmd.PersistentFlags().BoolVarP(&assumeYes, "yes", "y", false, "do not ask for confirmation")
 	cmd.PersistentFlags().BoolVar(&dryRun, "dry-run", false, "print what would happen without writing anything")
+	cmd.PersistentFlags().StringVar(&binDir, "bin-dir", defaultInstallDir(), "install the binary here instead of running it from wherever it is")
 
 	renderer := platformRenderer()
 
@@ -99,10 +101,10 @@ service job starts with a minimal environment of its own.`,
 	// that only tear one down, where the PATH and the token are not being decided
 	// and narrating them buries the one line the user asked for.
 	build := func() (*servicedef.Service, servicedef.Paths, error) {
-		return buildService(renderer, *configPath, pathOverride, true)
+		return buildService(renderer, *configPath, pathOverride, binDir, true)
 	}
 	buildRemoval := func() (*servicedef.Service, servicedef.Paths, error) {
-		return buildService(renderer, *configPath, pathOverride, false)
+		return buildService(renderer, *configPath, pathOverride, binDir, false)
 	}
 
 	// render is the read-only half. It writes nothing anywhere, which is what
@@ -154,6 +156,12 @@ service job starts with a minimal environment of its own.`,
 					fmt.Println("Cancelled. Nothing was written.")
 					return nil
 				}
+			}
+			if binDir != "" {
+				if err := installBinary(svc.Executable); err != nil {
+					return err
+				}
+				fmt.Printf("Installed binary: %s\n", svc.Executable)
 			}
 			return renderer.install(svc, paths)
 		},
@@ -258,20 +266,31 @@ service job starts with a minimal environment of its own.`,
 // explaining turns on the two reports — how the PATH was resolved and where the
 // token came from. They are for the commands that write a definition and whose
 // answer depends on both. `service path` exists to show the PATH on its own.
-func buildService(renderer serviceRenderer, configPath, pathOverride string, explaining bool) (*servicedef.Service, servicedef.Paths, error) {
+func buildService(renderer serviceRenderer, configPath, pathOverride, binDir string, explaining bool) (*servicedef.Service, servicedef.Paths, error) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return nil, servicedef.Paths{}, err
 	}
 
-	// The binary is the one running this command, resolved through symlinks so
-	// the job does not depend on a PATH that a login session may not have.
-	executable, err := os.Executable()
+	// The source is the binary running this command, resolved through symlinks
+	// so the job does not depend on a PATH that a login session may not have.
+	// It is only read from; the job runs an installed copy instead.
+	sourceExe, err := os.Executable()
 	if err != nil {
 		return nil, servicedef.Paths{}, fmt.Errorf("locate the running binary: %w", err)
 	}
-	if resolved, err := filepath.EvalSymlinks(executable); err == nil {
-		executable = resolved
+	if resolved, err := filepath.EvalSymlinks(sourceExe); err == nil {
+		sourceExe = resolved
+	}
+
+	// The job runs a copy at a stable, unprotected path rather than the binary
+	// in the source tree or the download folder. The old behaviour pointed the
+	// job at wherever the command was run from, which broke as soon as the tree
+	// moved and, on macOS, put the binary under a TCC-protected folder such as
+	// ~/Desktop or ~/Downloads, where a background job is silently denied.
+	executable := sourceExe
+	if binDir != "" {
+		executable = filepath.Join(binDir, binaryName())
 	}
 
 	// The working directory is the config file's directory, not the process's:
@@ -318,7 +337,7 @@ func buildService(renderer serviceRenderer, configPath, pathOverride string, exp
 	if explaining {
 		warnIfTokenNotPortable(cfg)
 	}
-	if err := validateServiceFiles(svc); err != nil {
+	if err := validateServiceFiles(svc, sourceExe); err != nil {
 		return nil, servicedef.Paths{}, err
 	}
 	return svc, paths, nil
@@ -360,18 +379,96 @@ func warnIfTokenNotPortable(cfg *config.Config) {
 // Each of these produces a job that starts and then fails, which reads as a
 // hung agent rather than a configuration mistake.
 //
+// It checks the source binary, not the install target: `render` and `status`
+// must work before the first install, when only the runner exists. install
+// copies the source to the target before the job is registered.
+//
 // It deliberately creates nothing. A read-only command that quietly makes a
 // directory has already failed the one guarantee it exists to provide — that
 // `render` and `--dry-run` can be run to look without touching the machine.
-func validateServiceFiles(svc *servicedef.Service) error {
+func validateServiceFiles(svc *servicedef.Service, sourceExe string) error {
 	if err := svc.Validate(); err != nil {
 		return err
 	}
-	if _, err := os.Stat(svc.Executable); err != nil {
-		return fmt.Errorf("the binary is not at %s (build it with `make build` first)", svc.Executable)
+	if _, err := os.Stat(sourceExe); err != nil {
+		return fmt.Errorf("the running binary is not at %s (build it with `make build` first)", sourceExe)
 	}
 	if _, err := os.Stat(svc.WorkingDir); err != nil {
 		return fmt.Errorf("the configuration directory %s does not exist", svc.WorkingDir)
+	}
+	return nil
+}
+
+// defaultInstallDir is where `service install` copies the binary so the job
+// does not depend on where the source tree or the download happened to be. On
+// Unix that is ~/.local/bin: a per-user directory that is on PATH for most
+// setups and, unlike ~/Downloads or ~/Desktop, is not TCC-protected. Empty when
+// there is no usable home directory, in which case the job runs the source in
+// place.
+func defaultInstallDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".local", "bin")
+}
+
+// binaryName is the filename the installed binary takes under the install dir.
+func binaryName() string {
+	if runtime.GOOS == "windows" {
+		return "termilink.exe"
+	}
+	return "termilink"
+}
+
+// installBinary copies the running binary to dest with owner-only execute
+// permissions. The copy is written to a temporary file in the destination
+// directory and renamed into place, so an interrupted install cannot leave a
+// truncated binary where the service expects to exec one.
+//
+// The bytes are copied rather than the file re-signed: a Mach-O code signature
+// is embedded in the binary, so a byte copy carries the signing identity along,
+// and the installed copy keeps whatever TCC grants the source had earned.
+func installBinary(dest string) error {
+	src, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("locate the running binary: %w", err)
+	}
+	if resolved, err := filepath.EvalSymlinks(src); err == nil {
+		src = resolved
+	}
+	if dest == "" || filepath.Clean(src) == filepath.Clean(dest) {
+		return nil
+	}
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return fmt.Errorf("read the running binary %s: %w", src, err)
+	}
+	dir := filepath.Dir(dest)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", dir, err)
+	}
+	tmp, err := os.CreateTemp(dir, ".termilink-install-*")
+	if err != nil {
+		return fmt.Errorf("create a temporary file in %s: %w", dir, err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return fmt.Errorf("write %s: %w", tmpName, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o755); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, dest); err != nil {
+		os.Remove(tmpName)
+		return fmt.Errorf("install %s: %w", dest, err)
 	}
 	return nil
 }
@@ -490,6 +587,14 @@ func describeService(renderer serviceRenderer, svc *servicedef.Service, paths se
 	fmt.Printf("Label:       %s\n", svc.Label)
 	fmt.Printf("Supervisor:  %s\n", renderer.name())
 	fmt.Printf("Executable:  %s\n", svc.Executable)
+	if src, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(src); err == nil {
+			src = resolved
+		}
+		if filepath.Clean(src) != filepath.Clean(svc.Executable) {
+			fmt.Printf("Installed from: %s\n", src)
+		}
+	}
 	fmt.Printf("Working dir: %s\n", svc.WorkingDir)
 	fmt.Printf("Definition:  %s\n", paths.Definition)
 	fmt.Printf("Stdout log:  %s\n", paths.LogStdout)

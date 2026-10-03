@@ -798,7 +798,12 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	}
 	h.auditEvent(resEntry)
 
-	if pwd := terminal.ParsePWD(out); pwd != "" {
+	// Only an absolute cwd is worth persisting. A relative one (the shell
+	// inherited a relative PWD, e.g. ".") would name a different directory each
+	// time it is replayed as cmd.Dir, so it is dropped and the display falls back
+	// to the process working directory.
+	pwd := terminal.ParsePWD(out)
+	if filepath.IsAbs(pwd) {
 		project := h.projectNameByPath(pwd)
 		h.mutateSession(st.ID, func(s *session.State) {
 			s.Cwd = pwd
@@ -835,10 +840,18 @@ func (h *Handler) runCommand(ctx context.Context, b *tg.Bot, chatID int64, userI
 	}
 
 	_, _ = b.SendChatAction(ctx, &tg.SendChatActionParams{ChatID: chatID, Action: models.ChatActionTyping})
-	h.send(ctx, b, chatID, formatRun(raw, terminal.Result{
+	msg := formatRun(raw, terminal.Result{
 		Output:   display,
 		ExitCode: exitCode,
-	}))
+	})
+	hintCwd := pwd
+	if !filepath.IsAbs(hintCwd) {
+		hintCwd = h.effectiveCwd(st)
+	}
+	if hint := permissionHint(hintCwd, cleanAll); hint != "" {
+		msg += "\n\n" + hint
+	}
+	h.send(ctx, b, chatID, msg)
 }
 
 func (h *Handler) authorizeCommand(st session.State, isOwner bool, raw string) (string, bool) {
@@ -909,7 +922,7 @@ func isCdCommand(raw string) bool {
 }
 
 func (h *Handler) effectiveCwd(st session.State) string {
-	if st.Cwd != "" {
+	if filepath.IsAbs(st.Cwd) {
 		return st.Cwd
 	}
 	if wd, err := os.Getwd(); err == nil {
@@ -931,7 +944,13 @@ func (h *Handler) getShell(st session.State) (*terminal.Shell, error) {
 	if h.runner == nil {
 		return nil, errors.New("no terminal runner configured")
 	}
-	s, err := h.runner.OpenShell(st.Cwd, env)
+	// A non-absolute st.Cwd is passed as "" so the shell inherits the process
+	// working directory instead of resolving "." against it implicitly.
+	dir := st.Cwd
+	if !filepath.IsAbs(dir) {
+		dir = ""
+	}
+	s, err := h.runner.OpenShell(dir, env)
 	if err != nil {
 		return nil, err
 	}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 
 	"github.com/spf13/cobra"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/saliherden/termilink/internal/audit"
 	"github.com/saliherden/termilink/internal/config"
+	"github.com/saliherden/termilink/internal/scaffold"
 	"github.com/saliherden/termilink/internal/session"
 	"github.com/saliherden/termilink/internal/version"
 )
@@ -175,17 +177,25 @@ func newInitCmd(configPath *string) *cobra.Command {
 			if _, err := os.Stat(*configPath); err == nil {
 				return fmt.Errorf("%s already exists", *configPath)
 			}
-			data, err := os.ReadFile("config.example.yaml")
-			if err != nil {
-				return fmt.Errorf("read example config: %w", err)
+			if dir := filepath.Dir(*configPath); dir != "" && dir != "." {
+				if err := os.MkdirAll(dir, 0o700); err != nil {
+					return fmt.Errorf("create %s: %w", dir, err)
+				}
 			}
-			if err := os.WriteFile(*configPath, data, 0o600); err != nil {
+			if err := scaffold.WriteConfig(*configPath); err != nil {
 				return err
 			}
 			fmt.Printf("Created %s.\n", *configPath)
+			envPath, err := scaffold.WriteEnvExample(filepath.Dir(*configPath))
+			if err != nil {
+				return err
+			}
+			if envPath != "" {
+				fmt.Printf("Created %s.\n", envPath)
+			}
 			fmt.Println("Next steps:")
 			fmt.Println("  1. Set security.allowed_users to your Telegram user id.")
-			fmt.Println("  2. Export TELEGRAM_BOT_TOKEN=... (or set telegram.bot_token directly).")
+			fmt.Println("  2. Put TELEGRAM_BOT_TOKEN=... in .env (or set telegram.bot_token directly).")
 			fmt.Println("  3. Run: termilink start")
 			return nil
 		},

@@ -1,0 +1,55 @@
+# GoReleaser configuration for TermiLink.
+# Triggered by .github/workflows/release.yml on a v* tag.
+#
+# The build is pure Go (creack/pty and x/sys, no cgo), so every target is a
+# straight cross-compile. darwin/arm64 binaries are ad-hoc signed by the Go
+# linker itself ("linker-signed"), which is why there is no explicit codesign
+# step here.
+version: 2
+
+project_name: termilink
+
+before:
+  hooks:
+    - go mod download
+
+builds:
+  - id: termilink
+    main: ./cmd/termilink
+    binary: termilink
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X github.com/saliherden/termilink/internal/version.Version={{ .Version }}
+
+archives:
+  - id: termilink
+    formats:
+      - tar.gz
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+      - "^ci:"
+
+release:
+  draft: false
+  prerelease: auto

@@ -531,7 +531,13 @@ func (s *Shell) ExecCommand(ctx context.Context, command string) ([]byte, error)
 	// TLM_RC captures the command's own status: $? is expanded while printf's
 	// arguments are built, which is still the previous command's status, so the
 	// printf itself cannot overwrite the value it is printing.
-	frame := fmt.Sprintf("printf '\\n%s'; %s; printf 'TLM_RC:%%s\\n' \"$?\"; printf 'TLM_PWD:%%s\n' \"$PWD\"; printf '%s'\n", startTok, command, stopTok)
+	//
+	// The cwd comes from the `pwd` builtin rather than $PWD: an inherited PWD can
+	// be relative ("." when the parent was started with a relative cwd), and a
+	// relative cwd in the session state is worse than none — it is replayed as
+	// cmd.Dir on the next shell and resolves against whatever the process cwd
+	// happens to be. `pwd` always answers with an absolute path.
+	frame := fmt.Sprintf("printf '\\n%s'; %s; printf 'TLM_RC:%%s\\n' \"$?\"; printf 'TLM_PWD:%%s\n' \"$(pwd)\"; printf '%s'\n", startTok, command, stopTok)
 
 	// Install the per-command capture before the frame is written, so the
 	// shell's echo of the start token is part of it. From here on this is the

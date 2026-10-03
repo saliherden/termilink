@@ -1,6 +1,5 @@
 # Internal / personal documents - not for end users
-project.md
-docs/
+notes/
 
 # Secrets
 .env

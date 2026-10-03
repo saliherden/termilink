@@ -3,6 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/saliherden/termilink/internal/config"
 	"github.com/saliherden/termilink/internal/version"
 )
 
@@ -11,12 +12,12 @@ func NewRootCmd() *cobra.Command {
 
 	root := &cobra.Command{
 		Use:           "termilink",
-		Short:         "Remote terminal access and development automation for your own computer",
+		Short:         "Control your computer from Telegram",
 		Version:       version.Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	root.PersistentFlags().StringVar(&configPath, "config", "config.yaml", "path to the configuration file")
+	root.PersistentFlags().StringVar(&configPath, "config", config.DefaultConfigPath(), "path to the configuration file")
 
 	root.AddCommand(
 		newStartCmd(&configPath),

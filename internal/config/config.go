@@ -12,6 +12,29 @@ import (
 
 const DefaultConfigFileName = "config.yaml"
 
+// HomeDir is TermiLink's per-user directory (~/.termilink). One home holds the
+// configuration, the persisted session state, the audit log and the PID lock,
+// so an installed agent depends on exactly one location. It is deliberately not
+// a TCC-protected folder such as ~/Desktop or ~/Downloads: a background service
+// can read it without a Full Disk Access grant. Empty when there is no usable
+// home directory.
+func HomeDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".termilink")
+}
+
+// DefaultConfigPath is the configuration a command reads when --config is not
+// given: config.yaml inside HomeDir. The former default was "config.yaml"
+// relative to the working directory, which made an installed service depend on
+// wherever its binary happened to run from — often a TCC-protected folder such
+// as ~/Downloads.
+func DefaultConfigPath() string {
+	return filepath.Join(HomeDir(), DefaultConfigFileName)
+}
+
 // Duration is a time.Duration that marshals/unmarshals from a YAML string
 // such as "30m", "1h30m".
 type Duration time.Duration
