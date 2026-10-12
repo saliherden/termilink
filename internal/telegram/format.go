@@ -49,7 +49,8 @@ const helpMsg = "*TermiLink Help*\n\n" +
 	"`agent <prompt>` opens your coding-agent CLI (opencode / claude / codex / gemini) inside the selected project directory. Its screen is relayed here and every message you send is typed into it.\n" +
 	"• plain text → sent as a prompt\n" +
 	"• `^p` → Ctrl+P (command palette), then `^x l` → Ctrl+X + l (switch session), `^x n` new session\n" +
-	"• `up` `down` `left` `right` `esc` `enter` `tab` `pageup` `pagedown` → those keys, sent as real key bytes (the arrows `↑↓←→` work too)\n" +
+	"• `up` `down` `left` `right` `esc` `enter` `tab` `shift+tab` `pageup` `pagedown` → those keys, sent as real key bytes (the arrows `↑↓←→` work too)\n" +
+	"• `shift+tab` (`st` or `/st`) cycles the primary agent — in opencode that is build ↔ plan; plain `tab` only completes the autocomplete\n" +
 	"• multi-key chords work as one message: `^x l`, `^p enter`, `up enter`\n" +
 	"• a slash is only a command when the bot knows it. With an agent running, anything else (`/update.sh`, a flag, a typo) is typed into the TUI as text instead of being refused\n" +
 	"• `/agent history` opens the scrollback as one colored image, then `/agent up` and `/agent down` scroll it a screen at a time\n" +

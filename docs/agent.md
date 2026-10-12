@@ -46,12 +46,14 @@ the 40-row window, so it holds the tail of the session. For the whole thing, use
 | `^p`, `^c`, … | Ctrl-key (`^p` = Ctrl+P → command palette) |
 | `↑` `↓` `←` `→` | arrow keys |
 | `up`, `down`, `left`, `right`, `esc`, `tab`, `enter`, `backspace`, `delete`, `home`, `end`, `pageup`, `pagedown`, `insert` | the named special key, sent as real key bytes |
+| `shift+tab` | Shift+Tab (`\x1b[Z`): cycles the primary agent, which is the build ↔ plan mode switch in opencode. Short form: `st` or `/st`. Plain `tab` is a different key — it completes the autocomplete |
 | `^x l` | key chord: `Ctrl+X` then `l` (switch session) — opencode uses `ctrl+x` chord shortcuts like `ctrl+x n` (new session), `ctrl+x m` (switch model) |
 | `^p enter` | chord that ends with Enter (select the highlighted palette entry) |
 
 Navigation inside panels is `↑`/`↓` + `enter` to select, `esc` to close. Key
 names go in without a slash — `up`, not `/up`, for the reason given in
 [A slash is only a command when the bot knows it](commands.md#a-slash-is-only-a-command-when-the-bot-knows-it).
+Key names are case-insensitive, so `Shift+Tab` and `shift+tab` are the same key.
 
 ## The scrollback reader
 

@@ -201,6 +201,15 @@ func TestMapInput(t *testing.T) {
 		{"/up", "\x1b[A", "/up", true},
 		{"\u2193", "\x1b[B", "\u2193", true},
 		{"/esc", "\x1b", "/esc", true},
+		{"tab", "\t", "tab", true},
+		{"/tab", "\t", "/tab", true},
+		{"shift+tab", "\x1b[Z", "shift+tab", true},
+		{"/shift+tab", "\x1b[Z", "/shift+tab", true},
+		{"st", "\x1b[Z", "st", true},
+		{"/st", "\x1b[Z", "/st", true},
+		{"Shift+Tab", "\x1b[Z", "Shift+Tab", true}, // key names are case-insensitive
+		{"TAB", "\t", "TAB", true},
+		{"shift+tab enter", "\x1b[Z\r", "shift+tab enter", true},
 		{"^p now", "^p now\r", "^p now", false},
 		{"^x l", "\x18l", "^x l", true},            // Ctrl+X then l (switch session)
 		{"^p enter", "\x10\r", "^p enter", true},   // palette then Enter

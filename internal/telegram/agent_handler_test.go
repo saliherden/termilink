@@ -391,7 +391,7 @@ func TestAgentKeyAliasCommands(t *testing.T) {
 	waitAgentFrame(t, run, "echo:/etc/hosts has the entry")
 
 	// The bare key names are unchanged.
-	for _, key := range []string{"up", "down", "esc", "tab", "pageup"} {
+	for _, key := range []string{"up", "down", "esc", "tab", "shift+tab", "st", "pageup"} {
 		h.handle(context.Background(), nil, 107, testAgentOwner, key)
 		if !run.sess.IsAlive() {
 			t.Fatalf("%q killed the session", key)

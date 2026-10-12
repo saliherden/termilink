@@ -16,6 +16,8 @@ var keyMappings = map[string]string{
 	"/left":      "\x1b[D",
 	"/esc":       "\x1b",
 	"/tab":       "\t",
+	"/shift+tab": "\x1b[Z",
+	"/st":        "\x1b[Z",
 	"/backspace": "\x7f",
 	"/enter":     "\r",
 	"/home":      "\x1b[H",
@@ -34,6 +36,8 @@ var keyMappings = map[string]string{
 	"right":      "\x1b[D",
 	"esc":        "\x1b",
 	"tab":        "\t",
+	"shift+tab":  "\x1b[Z",
+	"st":         "\x1b[Z",
 	"enter":      "\r",
 	"home":       "\x1b[H",
 	"end":        "\x1b[F",
@@ -48,13 +52,14 @@ var keyMappings = map[string]string{
 // the agent's input box, then Enter). Control and special keys map to their
 // terminal encodings, and multi-key chords like `^x l` (Ctrl+X then l) are
 // sent as the joined raw bytes without Enter. isSpecial is true for
-// control/special-key inputs.
+// control/special-key inputs. Key names are matched case-insensitively, so
+// `Shift+Tab` and `shift+tab` are the same key.
 func MapInput(text string) ([]byte, string, bool) {
 	t := strings.TrimSpace(text)
 	if m := ctrlRe.FindStringSubmatch(t); m != nil {
 		return []byte{m[1][0] & 0x1f}, "^" + m[1], true
 	}
-	if raw, ok := keyMappings[t]; ok {
+	if raw, ok := keyMappings[strings.ToLower(t)]; ok {
 		return []byte(raw), t, true
 	}
 	if tokens := strings.Fields(t); len(tokens) > 1 && isChord(tokens) {
@@ -90,7 +95,7 @@ func isKeyToken(tok string) bool {
 	if ctrlRe.MatchString(tok) {
 		return true
 	}
-	_, ok := keyMappings[tok]
+	_, ok := keyMappings[strings.ToLower(tok)]
 	return ok
 }
 
@@ -98,7 +103,7 @@ func keyBytes(tok string) []byte {
 	if m := ctrlRe.FindStringSubmatch(tok); m != nil {
 		return []byte{m[1][0] & 0x1f}
 	}
-	if raw, ok := keyMappings[tok]; ok {
+	if raw, ok := keyMappings[strings.ToLower(tok)]; ok {
 		return []byte(raw)
 	}
 	return []byte(tok)
