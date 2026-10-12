@@ -105,4 +105,6 @@ jobs:
         #
         # Pinned on purpose: an unpinned @latest would let a new release turn a
         # green build red for reasons that have nothing to do with this commit.
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+        # v0.8.2 is the floor for Go 1.27: older releases ship an x/tools that
+        # cannot decode the compiler's export data (version 5, max 4).
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...

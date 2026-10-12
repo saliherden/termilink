@@ -6,8 +6,8 @@
 the repository owner is deliberately exempt so a stale branch is never a reason to
 skip the checks. CI runs `ubuntu-24.04` and `macos-latest` with `fail-fast:
 false`, and each job runs `gofmt` → `go build` → `go vet` → `go test -race
--timeout 15m`, ordered cheapest first; `staticcheck` is pinned at `v0.8.1` and
-runs once, on the Linux job. Green in both is the bar for a pull request, though
+-timeout 15m`, ordered cheapest first; `staticcheck` is pinned at `v0.8.2` and
+runs in both jobs. Green in both is the bar for a pull request, though
 these are not currently enforced as required status checks and the ruleset has
 never actually gated a merge.
 
